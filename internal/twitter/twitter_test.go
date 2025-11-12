@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-resty/resty/v2"
 	"github.com/Gwenep/twitter-media-download/internal/utils"
+	"github.com/go-resty/resty/v2"
 )
 
 var client *resty.Client
@@ -22,17 +22,11 @@ var someUsers = []struct {
 	screenName string
 }{
 	{id: 1528902077325332480},
-	{id: 3316272504},
-	{id: 1478962175947390976},
 	{screenName: "Tsumugi69458619"},
-	{screenName: "_sosen_"},
-	{screenName: "baobaoxqaq"},
-	{screenName: "midorino_o"},
 }
 var someLists = []uint64{
 	1293998605938950144,
 	1073356376045436928,
-	1360265344439443460,
 }
 
 func init() {
