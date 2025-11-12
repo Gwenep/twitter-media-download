@@ -7,7 +7,7 @@ import (
 
 	"github.com/go-resty/resty/v2"
 	"github.com/tidwall/gjson"
-	"github.com/unkmonster/tmd/internal/utils"
+	"github.com/Gwenep/twitter-media-download/internal/utils"
 )
 
 type FollowState int

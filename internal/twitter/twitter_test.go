@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/go-resty/resty/v2"
-	"github.com/unkmonster/tmd/internal/utils"
+	"github.com/Gwenep/twitter-media-download/internal/utils"
 )
 
 var client *resty.Client

@@ -1,4 +1,4 @@
-module github.com/unkmonster/tmd
+module github.com/Gwenep/twitter-media-download
 
 go 1.22.3
 

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
-	"github.com/unkmonster/tmd/internal/database"
+	"github.com/Gwenep/twitter-media-download/internal/database"
 )
 
 // 路径Plus

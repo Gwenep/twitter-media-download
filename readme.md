@@ -50,7 +50,7 @@ go build .
 
 1. `storeage path`：存储路径(可以不存在)
 2. `auth_token`：用于登录，[获取方式](https://github.com/Gwenep/twitter-media-download/blob/master/doc/help.md#获取-cookie)
-3. `ct0`：用于登录，[获取方式](https://github.com/unkmonster/tmd/blob/master/doc/help.md#获取-cookie)
+3. `ct0`：用于登录，[获取方式](https://github.com/Gwenep/twitter-media-download/blob/master/doc/help.md#获取-cookie)
 4. `max_download_routine`：最大并发下载协程数（如果为0取默认值）
 
 #### 更新配置

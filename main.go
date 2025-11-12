@@ -21,10 +21,10 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/rifflock/lfshook"
 	log "github.com/sirupsen/logrus"
-	"github.com/unkmonster/tmd/internal/database"
-	"github.com/unkmonster/tmd/internal/downloading"
-	"github.com/unkmonster/tmd/internal/twitter"
-	"github.com/unkmonster/tmd/internal/utils"
+	"github.com/Gwenep/twitter-media-download/internal/database"
+	"github.com/Gwenep/twitter-media-download/internal/downloading"
+	"github.com/Gwenep/twitter-media-download/internal/twitter"
+	"github.com/Gwenep/twitter-media-download/internal/utils"
 	"gopkg.in/yaml.v3"
 )
 
