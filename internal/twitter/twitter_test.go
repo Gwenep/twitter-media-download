@@ -24,11 +24,9 @@ var someUsers = []struct {
 	{id: 1528902077325332480},
 	{id: 3316272504},
 	{id: 1478962175947390976},
-	{screenName: "Chibubao01"},
 	{screenName: "Tsumugi69458619"},
 	{screenName: "_sosen_"},
 	{screenName: "baobaoxqaq"},
-	{screenName: "Greenfish_insky"},
 	{screenName: "midorino_o"},
 }
 var someLists = []uint64{
