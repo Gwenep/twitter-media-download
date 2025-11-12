@@ -60,9 +60,7 @@ jobs:
         env:
           COVERALLS_REPO_TOKEN: ${{secrets.COVERALLS_REPO_TOKEN}}
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
-          GITHUB_RUN_ID: ${{github.run_id}}
-          GITHUB_RUN_NUMBER: ${{github.run_number}}
-        run: goveralls -coverprofile=covprofile -service=github -repotoken ${{secrets.COVERALLS_REPO_TOKEN}} -parallel -job ${{matrix.os}}
+        run: goveralls -coverprofile=covprofile -service=github -repotoken ${{secrets.COVERALLS_REPO_TOKEN}} -parallel -flagname ${{matrix.os}}
         
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
