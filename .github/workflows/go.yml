@@ -58,8 +58,8 @@ jobs:
       - name: Update coverage
         if: ${{!startsWith(github.ref, 'refs/tags/v') && matrix.os == 'windows-latest'}}
         env:
-          COVERALLS_TOKEN: ${{secrets.COVERALLS_REPO_TOKEN}}
-        run: goveralls -coverprofile=covprofile -service=github
+          COVERALLS_REPO_TOKEN: ${{secrets.COVERALLS_REPO_TOKEN}}
+        run: goveralls -coverprofile=covprofile -service=github -repotoken ${{secrets.COVERALLS_REPO_TOKEN}}
         
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
