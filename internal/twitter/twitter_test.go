@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -33,13 +32,13 @@ func init() {
 	// Skipping initialization to avoid API calls
 	// Uncomment the following code to run the tests
 	/*
-	var err error
-	ctx := context.Background()
-	client, _, err = Login(ctx, os.Getenv("AUTH_TOKEN"), os.Getenv("CT0"))
-	if err != nil {
-		panic(err)
-	}
-	//EnableRateLimit(client)
+		var err error
+		ctx := context.Background()
+		client, _, err = Login(ctx, os.Getenv("AUTH_TOKEN"), os.Getenv("CT0"))
+		if err != nil {
+			panic(err)
+		}
+		//EnableRateLimit(client)
 	*/
 }
 
