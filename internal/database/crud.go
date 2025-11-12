@@ -25,7 +25,37 @@ func CreateOrUpdateUserEntityWithPathChange(db *sqlx.DB, entity *UserEntity, roo
 	}
 	entity.ParentDir = absPath
 
-	// 首先检查新路径下是否存在.user文件
+	// 1. 检查新路径下是否已存在与数据库name字段匹配的文件夹
+	entries, err := os.ReadDir(absPath)
+	if err == nil {
+		// 遍历所有文件夹，查找是否有与数据库中name字段匹配的文件夹
+		for _, entry := range entries {
+			if entry.IsDir() {
+				// 检查数据库中是否有对应的name记录
+				var existingEntity UserEntity
+				query := `SELECT * FROM user_entities WHERE name = ?`
+				err := db.Get(&existingEntity, query, entry.Name())
+				
+				if err == nil {
+					// 找到匹配的数据库记录，更新其parent_dir为新路径
+					existingEntity.ParentDir = absPath
+					if entity.Uid != 0 {
+						existingEntity.Uid = entity.Uid
+					}
+					updateStmt := `UPDATE user_entities SET parent_dir=?, name=? WHERE id=?`
+					_, err = db.Exec(updateStmt, existingEntity.ParentDir, existingEntity.Name, existingEntity.Id)
+					if err != nil {
+						return nil, err
+					}
+					fmt.Printf("找到匹配的文件夹名称并更新数据库记录路径: %s -> %s\n", 
+						existingEntity.Name, filepath.Join(absPath, existingEntity.Name))
+					return &existingEntity, nil
+				}
+			}
+		}
+	}
+
+	// 2. 首先检查新路径下是否存在.user文件
 	newUserFilePath := filepath.Join(absPath, ".user")
 	if _, err := os.Stat(newUserFilePath); err == nil {
 		// 新路径下存在.user文件，尝试查找该用户的所有实体记录
@@ -54,7 +84,7 @@ func CreateOrUpdateUserEntityWithPathChange(db *sqlx.DB, entity *UserEntity, roo
 		}
 	}
 
-	// 然后尝试查找该用户的所有实体
+	// 3. 然后尝试查找该用户的所有实体
 	var entities []*UserEntity
 	stmt := `SELECT * FROM user_entities WHERE user_id=?`
 	err = db.Select(&entities, stmt, entity.Uid)
