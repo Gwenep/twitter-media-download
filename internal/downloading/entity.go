@@ -66,9 +66,13 @@ func (ue *UserEntity) Create(name string) error {
 		return err
 	}
 
-	if err := database.CreateUserEntity(ue.db, ue.record); err != nil {
+	// 使用新的路径变更处理函数，支持路径变更时的记录关联
+	updatedRecord, err := database.CreateOrUpdateUserEntityWithPathChange(ue.db, ue.record, filepath.Dir(path))
+	if err != nil {
 		return err
 	}
+	// 更新本地记录引用
+	ue.record = updatedRecord
 	ue.created = true
 	return nil
 }
@@ -175,12 +179,16 @@ func (le *ListEntity) Create(name string) error {
 	le.record.Name = name
 	path, _ := le.Path()
 	if err := os.MkdirAll(path, 0755); err != nil {
-		return nil
-	}
-
-	if err := database.CreateLstEntity(le.db, le.record); err != nil {
 		return err
 	}
+
+	// 使用新的路径变更处理函数，支持路径变更时的记录关联
+	updatedRecord, err := database.CreateOrUpdateLstEntityWithPathChange(le.db, le.record)
+	if err != nil {
+		return err
+	}
+	// 更新本地记录引用
+	le.record = updatedRecord
 	le.created = true
 	return nil
 }

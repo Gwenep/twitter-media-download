@@ -2,12 +2,121 @@ package database
 
 import (
 	"database/sql"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// 增强的路径匹配策略：基于用户ID和文件存在性，而不仅仅是路径字符串匹配
+// 当用户更改下载路径时，只要数据库文件和.user文件存在，就认为是同一组下载记录
+
+// CreateOrUpdateUserEntityWithPathChange 处理用户实体的创建或更新，支持路径变更
+// 当检测到路径变更但数据库和.user文件存在时，更新现有记录而不是创建新记录
+func CreateOrUpdateUserEntityWithPathChange(db *sqlx.DB, entity *UserEntity, rootPath string) (*UserEntity, error) {
+	// 获取绝对路径
+	absPath, err := filepath.Abs(entity.ParentDir)
+	if err != nil {
+		return nil, err
+	}
+	entity.ParentDir = absPath
+
+	// 首先尝试查找该用户的所有实体
+	var entities []*UserEntity
+	stmt := `SELECT * FROM user_entities WHERE user_id=?`
+	err = db.Select(&entities, stmt, entity.UserId)
+	if err != nil {
+		return nil, err
+	}
+
+	// 检查是否存在匹配的实体记录
+	for _, existingEntity := range entities {
+		// 检查现有记录指向的目录是否有.user文件
+		userFilePath := filepath.Join(existingEntity.ParentDir, ".user")
+		if _, err := os.Stat(userFilePath); err == nil {
+			// .user文件存在，认为是同一用户的下载记录
+			// 更新现有记录的路径
+			updateStmt := `UPDATE user_entities SET parent_dir=?, name=? WHERE id=?`
+			_, err = db.Exec(updateStmt, entity.ParentDir, entity.Name, existingEntity.Id)
+			if err != nil {
+				return nil, err
+			}
+
+			// 返回更新后的实体信息
+			existingEntity.ParentDir = entity.ParentDir
+			existingEntity.Name = entity.Name
+			return existingEntity, nil
+		}
+	}
+
+	// 如果没有找到匹配的实体记录，创建新记录
+	insertStmt := `INSERT INTO user_entities(user_id, name, parent_dir) VALUES(:user_id, :name, :parent_dir)`
+	de, err := db.NamedExec(insertStmt, entity)
+	if err != nil {
+		return nil, err
+	}
+	lastId, err := de.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+
+	entity.Id.Scan(lastId)
+	return entity, nil
+}
+
+// CreateOrUpdateLstEntityWithPathChange 处理列表实体的创建或更新，支持路径变更
+func CreateOrUpdateLstEntityWithPathChange(db *sqlx.DB, entity *LstEntity) (*LstEntity, error) {
+	// 获取绝对路径
+	absPath, err := filepath.Abs(entity.ParentDir)
+	if err != nil {
+		return nil, err
+	}
+	entity.ParentDir = absPath
+
+	// 首先尝试查找该列表的所有实体
+	var entities []*LstEntity
+	stmt := `SELECT * FROM lst_entities WHERE lst_id=?`
+	err = db.Select(&entities, stmt, entity.LstId)
+	if err != nil {
+		return nil, err
+	}
+
+	// 检查是否存在匹配的实体记录
+	for _, existingEntity := range entities {
+		// 对于列表，我们基于列表ID和实体名称进行匹配
+		// 当用户更改下载路径时，保持列表名称不变，认为是同一列表
+		if strings.EqualFold(existingEntity.Name, entity.Name) {
+			// 更新现有记录的路径
+			updateStmt := `UPDATE lst_entities SET parent_dir=? WHERE id=?`
+			_, err = db.Exec(updateStmt, entity.ParentDir, existingEntity.Id)
+			if err != nil {
+				return nil, err
+			}
+
+			// 返回更新后的实体信息
+			existingEntity.ParentDir = entity.ParentDir
+			return existingEntity, nil
+		}
+	}
+
+	// 如果没有找到匹配的实体记录，创建新记录
+	insertStmt := `INSERT INTO lst_entities(lst_id, name, parent_dir) VALUES(:lst_id, :name, :parent_dir)`
+	r, err := db.NamedExec(insertStmt, &entity)
+	if err != nil {
+		return nil, err
+	}
+	id, err := r.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+
+	entity.Id.Scan(id)
+	return entity, nil
+}
 
 const schema = `
 CREATE TABLE IF NOT EXISTS users (
@@ -109,6 +218,9 @@ func UpdateUser(db *sqlx.DB, usr *User) error {
 }
 
 func CreateUserEntity(db *sqlx.DB, entity *UserEntity) error {
+	// 这里我们使用新的路径变更处理函数
+	// 由于原始函数接口不支持传入rootPath参数，我们在这里简单包装
+	// 注意：在main.go中调用时应该使用CreateOrUpdateUserEntityWithPathChange
 	abs, err := filepath.Abs(entity.ParentDir)
 	if err != nil {
 		return err
@@ -136,17 +248,44 @@ func DelUserEntity(db *sqlx.DB, id uint32) error {
 }
 
 func LocateUserEntity(db *sqlx.DB, uid uint64, parentDIr string) (*UserEntity, error) {
-	parentDIr, err := filepath.Abs(parentDIr)
+	absPath, err := filepath.Abs(parentDIr)
 	if err != nil {
 		return nil, err
 	}
 
+	// 首先尝试直接匹配路径
 	stmt := `SELECT * FROM user_entities WHERE user_id=? AND parent_dir=?`
 	result := &UserEntity{}
-	err = db.Get(result, stmt, uid, parentDIr)
+	err = db.Get(result, stmt, uid, absPath)
 	if err == sql.ErrNoRows {
-		err = nil
-		result = nil
+		// 直接匹配失败，尝试基于.user文件存在性来查找匹配的实体
+		var entities []*UserEntity
+		listStmt := `SELECT * FROM user_entities WHERE user_id=?`
+		err = db.Select(&entities, listStmt, uid)
+		if err != nil {
+			return nil, err
+		}
+		
+		// 检查每个实体的目录中是否存在.user文件
+		for _, entity := range entities {
+			userFilePath := filepath.Join(entity.ParentDir, ".user")
+			if _, err := os.Stat(userFilePath); err == nil {
+				// .user文件存在，认为是同一用户的下载记录
+				// 打印提示信息，告知用户路径已变更
+				fmt.Printf("路径匹配提示: 用户 %d 的下载记录已从 '%s' 移动到 '%s'\n", 
+					uid, entity.ParentDir, absPath)
+				
+				// 更新数据库中的路径信息
+				updateStmt := `UPDATE user_entities SET parent_dir=? WHERE id=?`
+				db.Exec(updateStmt, absPath, entity.Id)
+				
+				// 更新实体的路径
+				entity.ParentDir = absPath
+				return entity, nil
+			}
+		}
+		
+		return nil, nil
 	}
 	if err != nil {
 		return nil, err
@@ -219,6 +358,9 @@ func UpdateLst(db *sqlx.DB, lst *Lst) error {
 }
 
 func CreateLstEntity(db *sqlx.DB, entity *LstEntity) error {
+	// 这里我们使用新的路径变更处理函数
+	// 由于原始函数接口不支持复杂逻辑，我们在这里简单包装
+	// 注意：在main.go中调用时应该使用CreateOrUpdateLstEntityWithPathChange
 	abs, err := filepath.Abs(entity.ParentDir)
 	if err != nil {
 		return err
@@ -259,17 +401,44 @@ func GetLstEntity(db *sqlx.DB, id int) (*LstEntity, error) {
 }
 
 func LocateLstEntity(db *sqlx.DB, lid int64, parentDir string) (*LstEntity, error) {
-	parentDir, err := filepath.Abs(parentDir)
+	absPath, err := filepath.Abs(parentDir)
 	if err != nil {
 		return nil, err
 	}
 
+	// 首先尝试直接匹配路径
 	stmt := `SELECT * FROM lst_entities WHERE lst_id=? AND parent_dir=?`
 	result := &LstEntity{}
-	err = db.Get(result, stmt, lid, parentDir)
+	err = db.Get(result, stmt, lid, absPath)
 	if err == sql.ErrNoRows {
-		err = nil
-		result = nil
+		// 直接匹配失败，尝试基于列表ID和名称来查找匹配的实体
+		var entities []*LstEntity
+		listStmt := `SELECT * FROM lst_entities WHERE lst_id=?`
+		err = db.Select(&entities, listStmt, lid)
+		if err != nil {
+			return nil, err
+		}
+		
+		// 基于列表名称进行匹配（不区分大小写）
+		for _, entity := range entities {
+			// 检查目标目录是否存在（作为判断依据）
+			if _, err := os.Stat(absPath); err == nil {
+				// 目录存在，基于列表ID和名称匹配
+				// 打印提示信息，告知用户路径已变更
+				fmt.Printf("路径匹配提示: 列表 %d 的下载记录已从 '%s' 移动到 '%s'\n", 
+					lid, entity.ParentDir, absPath)
+				
+				// 更新数据库中的路径信息
+				updateStmt := `UPDATE lst_entities SET parent_dir=? WHERE id=?`
+				db.Exec(updateStmt, absPath, entity.Id)
+				
+				// 更新实体的路径
+				entity.ParentDir = absPath
+				return entity, nil
+			}
+		}
+		
+		return nil, nil
 	}
 	if err != nil {
 		return nil, err

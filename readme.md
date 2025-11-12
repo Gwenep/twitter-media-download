@@ -1,11 +1,9 @@
 # Twitter Media Downloader
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/unkmonster/tmd.svg)](https://pkg.go.dev/github.com/unkmonster/tmd)
-[![Go Report Card](https://goreportcard.com/badge/github.com/unkmonster/tmd)](https://goreportcard.com/report/github.com/unkmonster/tmd)
-[![Coverage Status](https://coveralls.io/repos/github/unkmonster/tmd/badge.svg?branch=master)](https://coveralls.io/github/unkmonster/tmd?branch=master)
-[![Go](https://github.com/unkmonster/tmd/actions/workflows/go.yml/badge.svg)](https://github.com/unkmonster/tmd/actions/workflows/go.yml)
-![GitHub Release](https://img.shields.io/github/v/release/unkmonster/tmd) 
-![GitHub License](https://img.shields.io/github/license/unkmonster/tmd?logo=github)
+[![Go Report Card](https://goreportcard.com/badge/github.com/Gwenep/twitter-media-download)](https://goreportcard.com/report/github.com/Gwenep/twitter-media-download)
+[![Go](https://github.com/Gwenep/twitter-media-download/actions/workflows/go.yml/badge.svg)](https://github.com/Gwenep/twitter-media-download/actions/workflows/go.yml)
+![GitHub Release](https://img.shields.io/github/v/release/Gwenep/twitter-media-download) 
+![GitHub License](https://img.shields.io/github/license/Gwenep/twitter-media-download?logo=github)
 
 跨平台的推特媒体下载器。用于轻松，快速，安全，整洁，批量的下载推特上用户的推文。支持手动指定用户或通过列表、用户关注批量下载。开箱即用！
 
@@ -34,13 +32,13 @@
 
 **直接下载**
 
-前往 [Release](https://github.com/unkmonster/tmd/releases/latest) 自行选择合适的版本并下载
+前往 [Release](https://github.com/Gwenep/twitter-media-download/releases/latest) 自行选择合适的版本并下载
 
 **自行编译**
 
 ```bash
-git clone https://github.com/unkmonster/tmd
-cd tmd
+git clone https://github.com/Gwenep/twitter-media-download.git
+cd twitter-media-download
 go build .
 ```
 
@@ -51,7 +49,7 @@ go build .
 #### 配置项介绍
 
 1. `storeage path`：存储路径(可以不存在)
-2. `auth_token`：用于登录，[获取方式](https://github.com/unkmonster/tmd/blob/master/doc/help.md#获取-cookie)
+2. `auth_token`：用于登录，[获取方式](https://github.com/Gwenep/twitter-media-download/blob/master/doc/help.md#获取-cookie)
 3. `ct0`：用于登录，[获取方式](https://github.com/unkmonster/tmd/blob/master/doc/help.md#获取-cookie)
 4. `max_download_routine`：最大并发下载协程数（如果为0取默认值）
 
@@ -79,7 +77,7 @@ tmd --no-retry             // 仅转储，不在程序退出前自动重试下�
 
 > 为了创建符号链接，在 Windows 上应该以管理员身份运行程序
 
-[不知道啥是 user_id/list_id/screen_name?](https://github.com/unkmonster/tmd/blob/master/doc/help.md#%E8%8E%B7%E5%8F%96-list_id-user_id-screen_name)
+[不知道啥是 user_id/list_id/screen_name?](https://github.com/Gwenep/twitter-media-download/blob/master/doc/help.md#%E8%8E%B7%E5%8F%96-list_id-user_id-screen_name)
 
 ### 示例
 
@@ -146,18 +144,5 @@ Twitter API 限制一段时间内过快的请求 （例如某端点每15分钟�
 
 ## Contributors
 
-![](https://contrib.rocks/image?repo=unkmonster/tmd) 
-
-## 交流群
-
-tg: https://t.me/+I4yyM81HaJpkNTll
-
-## 感谢
-
-本项目 CDN 加速及安全防护由 Tencent EdgeOne 赞助：EdgeOne 提供长期有效的免费套餐，包含不限量的流量和请求，覆盖中国大陆节点，且无任何超额收费，感兴趣的朋友可以点击下面的链接领取
-
-<a href="https://edgeone.ai/zh?from=github">亚洲最佳CDN、边缘和安全解决方案 - Tencent EdgeOne</a>
-
-<img src="https://edgeone.ai/media/34fe3a45-492d-4ea4-ae5d-ea1087ca7b4b.png" alt="图片alt" title="图片title">
-
+![](https://contrib.rocks/image?repo=Gwenep/twitter-media-download)
 
