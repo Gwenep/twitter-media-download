@@ -59,7 +59,7 @@ jobs:
         if: ${{!startsWith(github.ref, 'refs/tags/v') && matrix.os == 'windows-latest'}}
         env:
           COVERALLS_REPO_TOKEN: ${{secrets.COVERALLS_REPO_TOKEN}}
-        run: goveralls -coverprofile=covprofile -service=github -repotoken ${{secrets.COVERALLS_REPO_TOKEN}}
+        run: goveralls -coverprofile=covprofile -service=github
         
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
