@@ -52,20 +52,29 @@ func downloadTweetMedia(ctx context.Context, client *resty.Client, dir string, t
 			return err
 		}
 
+		mutex.Lock()
+		path, err := utils.UniquePath(filepath.Join(dir, text+ext))
+		mutex.Unlock()
+		if err != nil {
+			return err
+		}
+
+		// 检查文件是否已存在
+		if _, err := os.Stat(path); err == nil {
+			log.Infof("文件已存在，跳过下载: %s", path)
+			continue
+		}
+
 		// 请求
 		resp, err := client.R().SetContext(ctx).SetQueryParam("name", "4096x4096").Get(u)
 		if err != nil {
 			return err
 		}
 
-		mutex.Lock()
-		path, err := utils.UniquePath(filepath.Join(dir, text+ext))
+		file, err := os.Create(path)
 		if err != nil {
-			mutex.Unlock()
 			return err
 		}
-		file, err := os.Create(path)
-		mutex.Unlock()
 		if err != nil {
 			return err
 		}

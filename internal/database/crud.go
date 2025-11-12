@@ -25,7 +25,36 @@ func CreateOrUpdateUserEntityWithPathChange(db *sqlx.DB, entity *UserEntity, roo
 	}
 	entity.ParentDir = absPath
 
-	// 首先尝试查找该用户的所有实体
+	// 首先检查新路径下是否存在.user文件
+	newUserFilePath := filepath.Join(absPath, ".user")
+	if _, err := os.Stat(newUserFilePath); err == nil {
+		// 新路径下存在.user文件，尝试查找该用户的所有实体记录
+		var entities []*UserEntity
+		stmt := `SELECT * FROM user_entities WHERE user_id=?`
+		err = db.Select(&entities, stmt, entity.Uid)
+		if err != nil {
+			return nil, err
+		}
+		
+		// 如果找到实体记录，更新路径并返回
+		if len(entities) > 0 {
+			// 更新第一个找到的实体记录的路径
+			existingEntity := entities[0]
+			updateStmt := `UPDATE user_entities SET parent_dir=?, name=? WHERE id=?`
+			_, err = db.Exec(updateStmt, entity.ParentDir, entity.Name, existingEntity.Id)
+			if err != nil {
+				return nil, err
+			}
+
+			// 返回更新后的实体信息
+			existingEntity.ParentDir = entity.ParentDir
+			existingEntity.Name = entity.Name
+			fmt.Printf("路径匹配提示: 用户 %d 的下载记录已更新到新路径 '%s'\n", entity.Uid, absPath)
+			return existingEntity, nil
+		}
+	}
+
+	// 然后尝试查找该用户的所有实体
 	var entities []*UserEntity
 	stmt := `SELECT * FROM user_entities WHERE user_id=?`
 	err = db.Select(&entities, stmt, entity.Uid)
@@ -253,7 +282,32 @@ func LocateUserEntity(db *sqlx.DB, uid uint64, parentDIr string) (*UserEntity, e
 		return nil, err
 	}
 
-	// 首先尝试直接匹配路径
+	// 首先检查新路径下是否存在.user文件
+	newUserFilePath := filepath.Join(absPath, ".user")
+	if _, err := os.Stat(newUserFilePath); err == nil {
+		// 新路径下存在.user文件，尝试查找该用户的所有实体记录
+		var entities []*UserEntity
+		listStmt := `SELECT * FROM user_entities WHERE user_id=?`
+		err = db.Select(&entities, listStmt, uid)
+		if err != nil {
+			return nil, err
+		}
+		
+		// 如果找到实体记录，更新路径并返回
+		if len(entities) > 0 {
+			// 更新第一个找到的实体记录的路径
+			entity := entities[0]
+			updateStmt := `UPDATE user_entities SET parent_dir=? WHERE id=?`
+			db.Exec(updateStmt, absPath, entity.Id)
+			
+			// 更新实体的路径
+			entity.ParentDir = absPath
+			fmt.Printf("路径匹配提示: 用户 %d 的下载记录已更新到新路径 '%s'\n", uid, absPath)
+			return entity, nil
+		}
+	}
+
+	// 然后尝试直接匹配路径
 	stmt := `SELECT * FROM user_entities WHERE user_id=? AND parent_dir=?`
 	result := &UserEntity{}
 	err = db.Get(result, stmt, uid, absPath)
