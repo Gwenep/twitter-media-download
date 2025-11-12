@@ -28,7 +28,7 @@ func CreateOrUpdateUserEntityWithPathChange(db *sqlx.DB, entity *UserEntity, roo
 	// 首先尝试查找该用户的所有实体
 	var entities []*UserEntity
 	stmt := `SELECT * FROM user_entities WHERE user_id=?`
-	err = db.Select(&entities, stmt, entity.UserId)
+	err = db.Select(&entities, stmt, entity.Uid)
 	if err != nil {
 		return nil, err
 	}
