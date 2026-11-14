@@ -50,6 +50,10 @@ jobs:
       
       - name: Test
         if: ${{!startsWith(github.ref, 'refs/tags/v')}}
+        run: go test ./...
+
+      - name: Test (race)
+        if: ${{!startsWith(github.ref, 'refs/tags/v') && 'ubuntu-latest' == matrix.os}}
         run: go test -race ./...
         
       - name: Upload build artifact
