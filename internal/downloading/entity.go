@@ -72,7 +72,10 @@ func NewUserEntity(db *sqlx.DB, uid uint64, parentDir string) (*UserEntity, erro
 
 func (ue *UserEntity) Create(name string) error {
 	ue.record.Name = name
-	path, _ := ue.Path()
+	path, err := ue.Path()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(path, 0755); err != nil {
 		return err
 	}
@@ -163,6 +166,14 @@ func (ue *UserEntity) RepairName(title string) error {
 }
 
 func (ue *UserEntity) Path() (string, error) {
+	// 新建用户时记录里还没有文件夹名（Name 由 Create 填充），
+	// 这里必须返回错误而不是让 database 层 panic，否则整个批次都会被中断。
+	if ue.record == nil {
+		return "", fmt.Errorf("user entity record was not loaded")
+	}
+	if ue.record.ParentDir == "" || ue.record.Name == "" {
+		return "", fmt.Errorf("user entity [%s:%d] path is not ready", ue.record.ParentDir, ue.record.Uid)
+	}
 	return ue.record.Path(), nil
 }
 
@@ -315,6 +326,13 @@ func (le *ListEntity) RepairName(title string) error {
 }
 
 func (le *ListEntity) Path() (string, error) {
+	// 同 UserEntity.Path：新建列表时 Name 尚未填充，不能直接 panic。
+	if le.record == nil {
+		return "", fmt.Errorf("list entity record was not loaded")
+	}
+	if le.record.ParentDir == "" || le.record.Name == "" {
+		return "", fmt.Errorf("list entity [%s:%d] path is not ready", le.record.ParentDir, le.record.LstId)
+	}
 	return le.record.Path(), nil
 }
 

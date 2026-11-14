@@ -80,3 +80,46 @@ func TestSyncUserRepairsHijackedRecord(t *testing.T) {
 		t.Fatalf("corrupt record was not repaired: %+v", repaired)
 	}
 }
+
+// 新用户第一次运行时数据库里还没有对应记录，文件夹名也是空的。
+// Path() 必须返回错误而不是 panic，否则整个“pre processing users”阶段会被中断。
+func TestSyncNewUserCreatesEntity(t *testing.T) {
+	dir := t.TempDir()
+
+	user := &twitter.User{Id: 9101, Name: "New User", ScreenName: "new_user"}
+	if err := database.CreateUser(db, &database.User{Id: user.Id, Name: user.Name, ScreenName: user.ScreenName}); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := NewUserEntity(db, user.Id, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pending.Path(); err == nil {
+		t.Fatal("expected error for entity without folder name")
+	}
+
+	entity, err := syncUserAndEntity(db, user, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := entity.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, user.Title())
+	if got != want {
+		t.Fatalf("path = %s, want %s", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(want, database.UserMarkerName)); err != nil {
+		t.Fatalf("marker missing: %v", err)
+	}
+
+	record, err := database.LocateUserEntity(db, user.Id, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record == nil || record.Name != user.Title() {
+		t.Fatalf("record = %+v", record)
+	}
+}
