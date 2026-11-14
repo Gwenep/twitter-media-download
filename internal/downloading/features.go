@@ -7,6 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,6 +27,8 @@ import (
 type PackgedTweet interface {
 	GetTweet() *twitter.Tweet
 	GetPath() string
+	// GetEntity 返回推文所属的用户实体；TweetInDir 没有实体时返回 nil
+	GetEntity() *UserEntity
 }
 
 type TweetInDir struct {
@@ -39,57 +44,253 @@ func (pt TweetInDir) GetPath() string {
 	return pt.path
 }
 
+func (pt TweetInDir) GetEntity() *UserEntity {
+	return nil
+}
+
+// 保护文件名分配和 media_files 预定，避免并发下载到同一个文件名
 var mutex sync.Mutex
 
-// 任何一个 url 下载失败直接返回
-// TODO: 要么全做，要么不做
-func downloadTweetMedia(ctx context.Context, client *resty.Client, dir string, tweet *twitter.Tweet) error {
+// 媒体请求返回 403/404/410 时重试也没有意义（被删除、DMCA 等），
+// 视为“永久跳过”，但不能因此放弃同一条推文里的其它媒体。
+func isPermanentMediaError(err error) bool {
+	return utils.IsStatusCode(err, 403) ||
+		utils.IsStatusCode(err, 404) ||
+		utils.IsStatusCode(err, 410)
+}
+
+// sameTweetTime 判断文件修改时间是否与推文时间一致。
+// 旧版本下载的文件会把 mtime 设置为推文发布时间，可借此识别旧文件，
+// 升级后第一次运行不会把已经下载过的内容再下载一遍。
+func sameTweetTime(modTime, tweetTime time.Time) bool {
+	diff := modTime.Sub(tweetTime)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= 2*time.Second
+}
+
+// nextFileName 在 name 的基础上生成下一个候选文件名。
+// 命名规则与 utils.UniquePath 保持一致（如 text.jpg -> text(1).jpg），
+// 这样旧版本下载的文件也能被正确识别并复用。
+func nextFileName(name string) string {
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	if strings.HasSuffix(stem, ")") {
+		if left := strings.LastIndex(stem, "("); left != -1 {
+			if n, err := strconv.Atoi(stem[left+1 : len(stem)-1]); err == nil {
+				return fmt.Sprintf("%s(%d)%s", stem[:left], n+1, ext)
+			}
+		}
+	}
+	return fmt.Sprintf("%s(1)%s", stem, ext)
+}
+
+// prepareMediaFile 决定某个媒体地址应当保存为哪个文件名。
+//
+// 返回 (文件名, 是否已经存在, 本次是否预定了记录, 错误)
+//
+//	已存在：直接跳过下载
+//	预定：先在 media_files 中占住文件名，再下载，防止并发覆盖
+func prepareMediaFile(db *sqlx.DB, entity *UserEntity, dir string, tweet *twitter.Tweet, url string, preferred string) (string, bool, bool, error) {
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	if db != nil && entity != nil {
+		recorded, err := database.GetMediaFile(db, tweet.Id, url)
+		if err != nil {
+			return "", false, false, err
+		}
+		if recorded != nil {
+			path := filepath.Join(dir, recorded.FileName)
+			exist, err := utils.PathExists(path)
+			if err != nil {
+				return "", false, false, err
+			}
+			// 已有记录：文件存在则跳过；不存在则沿用原来的文件名重新下载
+			return recorded.FileName, exist, false, nil
+		}
+	}
+
+	// 兼容旧版本下载的文件：仅当文件名未被占用且修改时间与推文时间吻合时才认领
+	legacyPath := filepath.Join(dir, preferred)
+	if exist, err := utils.PathExists(legacyPath); err != nil {
+		return "", false, false, err
+	} else if exist {
+		claimed := false
+		if db != nil && entity != nil {
+			if mf, err := database.GetMediaFileByName(db, int32(entity.Id()), preferred); err != nil {
+				return "", false, false, err
+			} else if mf != nil {
+				claimed = true
+			}
+		}
+		if !claimed {
+			if info, err := os.Stat(legacyPath); err == nil && sameTweetTime(info.ModTime(), tweet.CreatedAt) {
+				if db != nil && entity != nil {
+					if err := database.CreateMediaFile(db, &database.MediaFile{
+						TweetId:      tweet.Id,
+						Url:          url,
+						FileName:     preferred,
+						UserEntityId: int32(entity.Id()),
+					}); err != nil {
+						return "", false, false, err
+					}
+				}
+				return preferred, true, false, nil
+			}
+		}
+	}
+
+	// 分配一个未被文件系统或其他记录占用的文件名
+	name := preferred
+	for {
+		full := filepath.Join(dir, name)
+		exist, err := utils.PathExists(full)
+		if err != nil {
+			return "", false, false, err
+		}
+
+		claimed := false
+		if db != nil && entity != nil {
+			mf, err := database.GetMediaFileByName(db, int32(entity.Id()), name)
+			if err != nil {
+				return "", false, false, err
+			}
+			claimed = mf != nil
+		}
+		if !exist && !claimed {
+			break
+		}
+
+		if exist {
+			unique, err := utils.UniquePath(full)
+			if err != nil {
+				return "", false, false, err
+			}
+			name = filepath.Base(unique)
+		} else {
+			// 文件不存在但名字已被别的推文预定
+			name = nextFileName(name)
+		}
+	}
+
+	reserved := false
+	if db != nil && entity != nil {
+		if err := database.CreateMediaFile(db, &database.MediaFile{
+			TweetId:      tweet.Id,
+			Url:          url,
+			FileName:     name,
+			UserEntityId: int32(entity.Id()),
+		}); err != nil {
+			return "", false, false, err
+		}
+		reserved = true
+	}
+	return name, false, reserved, nil
+}
+
+// downloadTweetMedia 下载一条推文中的所有媒体。
+//
+// 与旧实现不同：
+//   - 一个媒体失败不会阻止同一条推文里的其它媒体继续下载
+//   - 已下载的文件通过 media_files 精确识别，重试不会产生重复文件
+//   - 403/404/410 只跳过对应的媒体，并把它视为已处理，不会被无限重试
+func downloadTweetMedia(ctx context.Context, client *resty.Client, db *sqlx.DB, entity *UserEntity, dir string, tweet *twitter.Tweet) error {
 	text := utils.WinFileName(tweet.Text)
+	downloaded := 0
+	var firstTransient error
+	extCount := make(map[string]int)
 
 	for _, u := range tweet.Urls {
-		ext, err := utils.GetExtFromUrl(u)
-		if err != nil {
-			return err
-		}
-
-		mutex.Lock()
-		path, err := utils.UniquePath(filepath.Join(dir, text+ext))
-		mutex.Unlock()
-		if err != nil {
-			return err
-		}
-
-		// 检查文件是否已存在
-		if _, err := os.Stat(path); err == nil {
-			log.Infof("文件已存在，跳过下载: %s", path)
+		if u == "" {
 			continue
 		}
 
-		// 请求
+		ext, err := utils.GetExtFromUrl(u)
+		if err != nil || ext == "" {
+			log.WithFields(log.Fields{
+				"user": tweet.Creator.Title(),
+				"url":  u,
+			}).Warnln("failed to get file extension from url, skipped")
+			continue
+		}
+		ext = strings.ToLower(ext)
+
+		index := extCount[ext]
+		extCount[ext] = index + 1
+		preferred := text + ext
+		if index > 0 {
+			preferred = fmt.Sprintf("%s(%d)%s", text, index, ext)
+		}
+
+		name, exist, reserved, err := prepareMediaFile(db, entity, dir, tweet, u, preferred)
+		if err != nil {
+			if firstTransient == nil {
+				firstTransient = err
+			}
+			continue
+		}
+		if exist {
+			log.Debugf("media already exists, skipped: %s", filepath.Join(dir, name))
+			continue
+		}
+
+		path := filepath.Join(dir, name)
 		resp, err := client.R().SetContext(ctx).SetQueryParam("name", "4096x4096").Get(u)
 		if err != nil {
-			return err
+			if reserved && db != nil {
+				_ = database.DeleteMediaFile(db, tweet.Id, u)
+			}
+			if isPermanentMediaError(err) {
+				log.WithFields(log.Fields{
+					"user": tweet.Creator.Title(),
+					"url":  u,
+				}).Warnln("media is unavailable (403/404/410), skipped:", err)
+				continue
+			}
+			if firstTransient == nil {
+				firstTransient = err
+			}
+			continue
 		}
 
 		file, err := os.Create(path)
 		if err != nil {
-			return err
+			if reserved && db != nil {
+				_ = database.DeleteMediaFile(db, tweet.Id, u)
+			}
+			if firstTransient == nil {
+				firstTransient = err
+			}
+			continue
 		}
-		if err != nil {
-			return err
-		}
-
-		defer os.Chtimes(path, time.Time{}, tweet.CreatedAt)
-		defer file.Close()
 
 		_, err = file.Write(resp.Body())
-		if err != nil {
-			return err
+		closeErr := file.Close()
+		if err == nil {
+			err = closeErr
 		}
+		if err != nil {
+			if reserved && db != nil {
+				_ = database.DeleteMediaFile(db, tweet.Id, u)
+			}
+			_ = os.Remove(path)
+			if firstTransient == nil {
+				firstTransient = err
+			}
+			continue
+		}
+
+		// 保留推文发布日期，同时作为旧文件识别依据
+		_ = os.Chtimes(path, time.Time{}, tweet.CreatedAt)
+		downloaded++
 	}
 
-	fmt.Printf("%s %s\n", color.FgLightMagenta.Render("["+tweet.Creator.Title()+"]"), text)
-	return nil
+	if downloaded > 0 {
+		fmt.Printf("%s %s\n", color.FgLightMagenta.Render("["+tweet.Creator.Title()+"]"), text)
+	}
+	return firstTransient
 }
 
 var MaxDownloadRoutine int
@@ -108,7 +309,7 @@ type workerConfig struct {
 }
 
 // 负责下载推文，保证 tweet chan 内的推文要么下载成功，要么推送至 error chan
-func tweetDownloader(client *resty.Client, config *workerConfig, errch chan<- PackgedTweet, twech <-chan PackgedTweet) {
+func tweetDownloader(client *resty.Client, db *sqlx.DB, config *workerConfig, errch chan<- PackgedTweet, twech <-chan PackgedTweet) {
 	var pt PackgedTweet
 	var ok bool
 
@@ -146,9 +347,9 @@ func tweetDownloader(client *resty.Client, config *workerConfig, errch chan<- Pa
 			errch <- pt
 			continue
 		}
-		err := downloadTweetMedia(config.ctx, client, path, pt.GetTweet())
-		// 403: Dmcaed
-		if err != nil && !utils.IsStatusCode(err, 404) && !utils.IsStatusCode(err, 403) {
+		err := downloadTweetMedia(config.ctx, client, db, pt.GetEntity(), path, pt.GetTweet())
+		// 403/404/410: 被删除或 DMCA，重试无意义
+		if err != nil && !isPermanentMediaError(err) {
 			errch <- pt
 		}
 
@@ -160,7 +361,7 @@ func tweetDownloader(client *resty.Client, config *workerConfig, errch chan<- Pa
 }
 
 // 批量下载推文并返回下载失败的推文，可以保证推文被成功下载或被返回
-func BatchDownloadTweet(ctx context.Context, client *resty.Client, pts ...PackgedTweet) []PackgedTweet {
+func BatchDownloadTweet(ctx context.Context, client *resty.Client, db *sqlx.DB, pts ...PackgedTweet) []PackgedTweet {
 	if len(pts) == 0 {
 		return nil
 	}
@@ -184,7 +385,7 @@ func BatchDownloadTweet(ctx context.Context, client *resty.Client, pts ...Packge
 	}
 	for i := 0; i < numRoutine; i++ {
 		wg.Add(1)
-		go tweetDownloader(client, &config, errChan, tweetChan)
+		go tweetDownloader(client, db, &config, errChan, tweetChan)
 	}
 
 	go func() {
@@ -235,15 +436,54 @@ func syncUser(db *sqlx.DB, user *twitter.User) error {
 	return err
 }
 
-func getTweetAndUpdateLatestReleaseTime(ctx context.Context, client *resty.Client, user *twitter.User, entity *UserEntity) ([]*twitter.Tweet, error) {
-	tweets, err := user.GetMeidas(ctx, client, &utils.TimeRange{Min: entity.LatestReleaseTime()})
-	if err != nil || len(tweets) == 0 {
-		return nil, err
+func failedTweetIDs(fails []PackgedTweet) map[uint64]struct{} {
+	ids := make(map[uint64]struct{}, len(fails))
+	for _, pt := range fails {
+		if pt == nil || pt.GetTweet() == nil {
+			continue
+		}
+		ids[pt.GetTweet().Id] = struct{}{}
 	}
-	if err := entity.SetLatestReleaseTime(tweets[0].CreatedAt); err != nil {
-		return nil, err
+	return ids
+}
+
+// latestSafeReleaseTime 计算本次可以安全推进的“最后下载时间”。
+//
+// 如果没有任何失败，可以推进到最新推文；
+// 如果有失败，只能推进到“比最旧失败推文更旧的最新一条成功推文”，
+// 这样下一次拉取时间线时一定会包含失败的推文。
+// 即使进程被强制结束、错误记录来不及写入磁盘，失败内容也不会被永久跳过。
+func latestSafeReleaseTime(tweets []*twitter.Tweet, failed map[uint64]struct{}) (time.Time, bool) {
+	if len(tweets) == 0 {
+		return time.Time{}, false
 	}
-	return tweets, nil
+
+	sorted := make([]*twitter.Tweet, len(tweets))
+	copy(sorted, tweets)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].CreatedAt.After(sorted[j].CreatedAt)
+	})
+
+	var oldestFail *time.Time
+	for _, tw := range sorted {
+		if _, ok := failed[tw.Id]; !ok {
+			continue
+		}
+		if oldestFail == nil || tw.CreatedAt.Before(*oldestFail) {
+			t := tw.CreatedAt
+			oldestFail = &t
+		}
+	}
+	if oldestFail == nil {
+		return sorted[0].CreatedAt, true
+	}
+
+	for _, tw := range sorted {
+		if tw.CreatedAt.Before(*oldestFail) {
+			return tw.CreatedAt, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func DownloadUser(ctx context.Context, db *sqlx.DB, client *resty.Client, user *twitter.User, dir string) ([]PackgedTweet, error) {
@@ -262,7 +502,7 @@ func DownloadUser(ctx context.Context, db *sqlx.DB, client *resty.Client, user *
 	}
 
 	syncedUsers.Store(user.Id, entity)
-	tweets, err := getTweetAndUpdateLatestReleaseTime(ctx, client, user, entity)
+	tweets, err := user.GetMeidas(ctx, client, &utils.TimeRange{Min: entity.LatestReleaseTime()})
 	if err != nil || len(tweets) == 0 {
 		return nil, err
 	}
@@ -273,20 +513,66 @@ func DownloadUser(ctx context.Context, db *sqlx.DB, client *resty.Client, user *
 		pts = append(pts, TweetInEntity{Tweet: tw, Entity: entity})
 	}
 
-	return BatchDownloadTweet(ctx, client, pts...), nil
+	fails := BatchDownloadTweet(ctx, client, db, pts...)
+	failed := failedTweetIDs(fails)
+	if newTime, ok := latestSafeReleaseTime(tweets, failed); ok {
+		if len(failed) == 0 {
+			err = database.UpdateUserEntityTweetStat(db, entity.Id(), newTime, user.MediaCount)
+		} else {
+			err = database.SetUserEntityLatestReleaseTime(db, entity.Id(), newTime)
+		}
+		if err != nil {
+			return fails, err
+		}
+	}
+	return fails, nil
+}
+
+// safeUserTitle 处理不同用户恰好同名（或旧数据损坏）的情况，
+// 避免把两个用户写到同一个文件夹。
+func safeUserTitle(dir string, user *twitter.User) string {
+	title := utils.WinFileName(user.Title())
+	target := filepath.Join(dir, title)
+	if marker, _ := database.ReadUserMarker(target); marker != nil && marker.UserId != user.Id {
+		title = fmt.Sprintf("%s [%d]", title, user.Id)
+	}
+	return title
 }
 
 func syncUserAndEntity(db *sqlx.DB, user *twitter.User, dir string) (*UserEntity, error) {
 	if err := syncUser(db, user); err != nil {
 		return nil, err
 	}
-	expectedTitle := utils.WinFileName(user.Title())
+	expectedTitle := safeUserTitle(dir, user)
 
 	entity, err := NewUserEntity(db, user.Id, dir)
 	if err != nil {
 		return nil, err
 	}
+
+	// 旧版本可能把当前用户的记录错误关联到另一个用户的文件夹（同名匹配未校验 user_id）。
+	// 这种情况下只修正数据库里的名称，绝不 Rename 移动别人的文件夹。
+	if cur, err := entity.Path(); err == nil {
+		if marker, _ := database.ReadUserMarker(cur); marker != nil && marker.UserId != user.Id {
+			if err := entity.RepairName(expectedTitle); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	if err = syncPath(entity, expectedTitle); err != nil {
+		return nil, err
+	}
+
+	// 最后一道防线：文件夹若明确属于其他用户，绝不写入
+	path, err := entity.Path()
+	if err != nil {
+		return nil, err
+	}
+	if marker, _ := database.ReadUserMarker(path); marker != nil && marker.UserId != user.Id {
+		return nil, fmt.Errorf("folder %s belongs to user %d", path, marker.UserId)
+	}
+	if err := database.WriteUserMarker(path, user.Id, user.Name, user.ScreenName); err != nil {
 		return nil, err
 	}
 	return entity, nil
@@ -307,6 +593,10 @@ func (pt TweetInEntity) GetPath() string {
 		return ""
 	}
 	return path
+}
+
+func (pt TweetInEntity) GetEntity() *UserEntity {
+	return pt.Entity
 }
 
 const userTweetRateLimit = 500
@@ -335,6 +625,42 @@ func calcUserDepth(exist int, total int) int {
 type userInLstEntity struct {
 	user *twitter.User
 	leid *int
+}
+
+// 本次运行中成功获取到的时间线，下载全部结束后再根据下载结果更新进度
+type userFetchStat struct {
+	entity     *UserEntity
+	mediaCount int
+	tweets     []*twitter.Tweet
+}
+
+func finalizeUserFetchStats(db *sqlx.DB, stats map[int]*userFetchStat, failed map[uint64]struct{}) error {
+	for _, st := range stats {
+		newTime, ok := latestSafeReleaseTime(st.tweets, failed)
+		if !ok {
+			continue
+		}
+
+		hasFail := false
+		for _, tw := range st.tweets {
+			if _, exists := failed[tw.Id]; exists {
+				hasFail = true
+				break
+			}
+		}
+
+		var err error
+		if hasFail {
+			// 有失败时只推进到安全位置，媒体数量保持不变
+			err = database.SetUserEntityLatestReleaseTime(db, st.entity.Id(), newTime)
+		} else {
+			err = database.UpdateUserEntityTweetStat(db, st.entity.Id(), newTime, st.mediaCount)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func shouldIngoreUser(user *twitter.User) bool {
@@ -495,6 +821,9 @@ func BatchUserDownload(ctx context.Context, client *resty.Client, db *sqlx.DB, u
 	clients = append(clients, client)
 	clients = append(clients, additional...)
 
+	fetchStats := make(map[int]*userFetchStat)
+	var fetchStatsMtx sync.Mutex
+
 	producer := func(entity *UserEntity) {
 		defer prodwg.Done()
 		defer panicHandler()
@@ -544,19 +873,31 @@ func BatchUserDownload(ctx context.Context, client *resty.Client, db *sqlx.DB, u
 			return
 		}
 
-		// 确保该用户所有推文已推送并更新用户推文状态
+		// 确保该用户所有推文已推送。注意：这里不再立即推进“最后下载时间”，
+		// 而是等所有下载结束后，根据实际成功/失败情况更新（见 finalizeUserFetchStats）。
+		sentAll := true
 		for _, tw := range tweets {
 			pt := TweetInEntity{Tweet: tw, Entity: entity}
 			select {
 			case tweetChan <- &pt:
 			case <-ctx.Done():
-				return // 防止无消费者导致死锁
+				sentAll = false // 防止无消费者导致死锁
+			}
+			if !sentAll {
+				break
 			}
 		}
 
-		if err := database.UpdateUserEntityTweetStat(db, entity.Id(), tweets[0].CreatedAt, user.MediaCount); err != nil {
-			// 影响程序的正确性，必须 Panic
-			getterLogger.WithField("user", entity.Name()).Panicln("failed to update user tweets stat:", err)
+		// 只有所有推文都成功进入下载队列且上下文未被取消时才记录进度，
+		// 否则一旦进程被中断，未推送的旧推文会因为时间线起点前移而永久丢失。
+		if sentAll && ctx.Err() == nil {
+			fetchStatsMtx.Lock()
+			fetchStats[entity.Id()] = &userFetchStat{
+				entity:     entity,
+				mediaCount: user.MediaCount,
+				tweets:     tweets,
+			}
+			fetchStatsMtx.Unlock()
 		}
 	}
 
@@ -568,7 +909,7 @@ func BatchUserDownload(ctx context.Context, client *resty.Client, db *sqlx.DB, u
 	}
 	for i := 0; i < MaxDownloadRoutine; i++ {
 		conswg.Add(1)
-		go tweetDownloader(client, &config, errChan, tweetChan)
+		go tweetDownloader(client, db, &config, errChan, tweetChan)
 	}
 
 	producerPool, err := ants.NewPool(min(userTweetMaxConcurrent, userEntityHeap.Size()))
@@ -627,16 +968,58 @@ func BatchUserDownload(ctx context.Context, client *resty.Client, db *sqlx.DB, u
 		fails = append(fails, pt.(*TweetInEntity))
 	}
 	log.Debugf("%d users unable to start", userEntityHeap.Size())
+
+	// 下载全部结束后再推进进度：只有成功（或永久跳过）的推文才会被算入，
+	// 失败推文下一次仍会落在时间线拉取范围内。
+	failedIDs := make(map[uint64]struct{}, len(fails))
+	for _, pt := range fails {
+		failedIDs[pt.Tweet.Id] = struct{}{}
+	}
+	if err := finalizeUserFetchStats(db, fetchStats, failedIDs); err != nil {
+		getterLogger.Warnln("failed to update user download progress:", err)
+	}
+
 	return fails, context.Cause(ctx)
 }
 
-func downloadList(ctx context.Context, client *resty.Client, db *sqlx.DB, list twitter.ListBase, dir string, realDir string, autoFollow bool, additional []*resty.Client) ([]*TweetInEntity, error) {
-	expectedTitle := utils.WinFileName(list.Title())
+// syncListEntity 同步列表实体、文件夹以及身份标记
+func syncListEntity(db *sqlx.DB, list twitter.ListBase, dir string) (*ListEntity, error) {
+	title := utils.WinFileName(list.Title())
+	if marker, _ := database.ReadListMarker(filepath.Join(dir, title)); marker != nil && marker.ListId != list.GetId() {
+		title = fmt.Sprintf("%s [%d]", title, list.GetId())
+	}
+
 	entity, err := NewListEntity(db, list.GetId(), dir)
 	if err != nil {
 		return nil, err
 	}
-	if err := syncPath(entity, expectedTitle); err != nil {
+	if cur, err := entity.Path(); err == nil {
+		if marker, _ := database.ReadListMarker(cur); marker != nil && marker.ListId != list.GetId() {
+			if err := entity.RepairName(title); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := syncPath(entity, title); err != nil {
+		return nil, err
+	}
+
+	path, err := entity.Path()
+	if err != nil {
+		return nil, err
+	}
+	if marker, _ := database.ReadListMarker(path); marker != nil && marker.ListId != list.GetId() {
+		return nil, fmt.Errorf("folder %s belongs to list %d", path, marker.ListId)
+	}
+	if err := database.WriteListMarker(path, list.GetId(), list.Title()); err != nil {
+		return nil, err
+	}
+	return entity, nil
+}
+
+func downloadList(ctx context.Context, client *resty.Client, db *sqlx.DB, list twitter.ListBase, dir string, realDir string, autoFollow bool, additional []*resty.Client) ([]*TweetInEntity, error) {
+	entity, err := syncListEntity(db, list, dir)
+	if err != nil {
 		return nil, err
 	}
 
@@ -683,12 +1066,8 @@ func syncLstAndGetMembers(ctx context.Context, client *resty.Client, db *sqlx.DB
 	}
 
 	// update lst path and record
-	expectedTitle := utils.WinFileName(lst.Title())
-	entity, err := NewListEntity(db, lst.GetId(), dir)
+	entity, err := syncListEntity(db, lst, dir)
 	if err != nil {
-		return nil, err
-	}
-	if err := syncPath(entity, expectedTitle); err != nil {
 		return nil, err
 	}
 

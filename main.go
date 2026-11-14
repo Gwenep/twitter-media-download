@@ -418,8 +418,8 @@ func connectDatabase(path string) (*sqlx.DB, error) {
 		return nil, err
 	}
 
-	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&busy_timeout=2147483647", path)
-	db, err := sqlx.Connect("sqlite3", dsn)
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(2147483647)", path)
+	db, err := sqlx.Connect("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -519,7 +519,7 @@ func retryFailedTweets(ctx context.Context, dumper *downloading.TweetDumper, db 
 		toretry = append(toretry, leg)
 	}
 
-	newFails := downloading.BatchDownloadTweet(ctx, client, toretry...)
+	newFails := downloading.BatchDownloadTweet(ctx, client, db, toretry...)
 	dumper.Clear()
 	for _, pt := range newFails {
 		te := pt.(*downloading.TweetInEntity)

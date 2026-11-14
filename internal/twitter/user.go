@@ -3,6 +3,7 @@ package twitter
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -129,40 +130,29 @@ func (u *User) getMediasOnePage(ctx context.Context, api *userMedia, client *res
 	return itemContentsToTweets(itemContents), next, err
 }
 
-// 在逆序切片中，筛选出在 timerange 范围内的推文
-func filterTweetsByTimeRange(tweets []*Tweet, min *time.Time, max *time.Time) (cutMin bool, cutMax bool, res []*Tweet) {
-	n := len(tweets)
-	begin, end := 0, n
-
-	// 从左到右查找第一个小于 min 的推文
-	if min != nil && !min.IsZero() {
-		for i := 0; i < n; i++ {
-			if !tweets[i].CreatedAt.After(*min) {
-				end = i // 找到第一个不大于 min 的推文位置
-				cutMin = true
-				break
-			}
+// filterTweetsByTimeRange 筛选一页中落在时间范围内的推文。
+//
+// min 为闭区间下界：时间恰好等于 min 的推文也会保留。
+// 这样即使多条推文发布于同一秒，也不会因为边界比较而漏掉。
+//
+// reachedMin 表示这一页已经没有任何 >= min 的推文，可以停止翻页。
+// 该判断基于整页而不是“第一条早于 min 的推文”，因此置顶推文（时间较旧）
+// 混在页面中时不会导致提前停止翻页。
+func filterTweetsByTimeRange(tweets []*Tweet, min *time.Time, max *time.Time) (reachedMin bool, res []*Tweet) {
+	reachedMin = true
+	for _, tw := range tweets {
+		if min != nil && !min.IsZero() && tw.CreatedAt.Before(*min) {
+			continue
 		}
-	}
+		// 页内存在达到下界的推文，说明还没翻到旧内容区
+		reachedMin = false
 
-	// 从右到左查找最后一个大于 max 的推文
-	if max != nil && !max.IsZero() {
-		for i := n - 1; i >= 0; i-- {
-			if !tweets[i].CreatedAt.Before(*max) {
-				begin = i + 1 // 找到第一个不小于 max 的推文位置
-				cutMax = true
-				break
-			}
+		if max != nil && !max.IsZero() && tw.CreatedAt.After(*max) {
+			continue
 		}
+		res = append(res, tw)
 	}
-
-	if begin >= end {
-		// 如果最终的范围无效，返回空结果
-		return cutMin, cutMax, nil
-	}
-
-	res = tweets[begin:end]
-	return
+	return reachedMin, res
 }
 
 func (u *User) GetMeidas(ctx context.Context, client *resty.Client, timeRange *utils.TimeRange) ([]*Tweet, error) {
@@ -185,6 +175,7 @@ func (u *User) GetMeidas(ctx context.Context, client *resty.Client, timeRange *u
 		maxTime = &timeRange.Max
 	}
 
+	prevCursor := ""
 	for {
 		currentTweets, next, err := u.getMediasOnePage(ctx, &api, client)
 		if err != nil {
@@ -192,26 +183,49 @@ func (u *User) GetMeidas(ctx context.Context, client *resty.Client, timeRange *u
 		}
 
 		if len(currentTweets) == 0 {
-			break // empty page
-		}
-
-		api.SetCursor(next)
-
-		if timeRange == nil {
-			results = append(results, currentTweets...)
+			// 空页但仍有新 cursor 时不能直接结束：时间线中可能混有非推文模块，
+			// 直接退出会漏掉后面的内容。cursor 没有前进时才认为真正到末尾。
+			if next == "" || next == prevCursor || next == api.cursor {
+				break
+			}
+			prevCursor = api.cursor
+			api.SetCursor(next)
 			continue
 		}
 
-		// 筛选推文，并判断是否获取下页
-		cutMin, cutMax, currentTweets := filterTweetsByTimeRange(currentTweets, minTime, maxTime)
-		results = append(results, currentTweets...)
+		if timeRange == nil {
+			results = append(results, currentTweets...)
+		} else {
+			reachedMin, page := filterTweetsByTimeRange(currentTweets, minTime, maxTime)
+			results = append(results, page...)
+			if reachedMin {
+				break
+			}
+		}
 
-		if cutMin {
+		// cursor 没有前进说明已经到末尾，避免死循环
+		if next == "" || next == prevCursor || next == api.cursor {
 			break
 		}
-		if cutMax && len(currentTweets) != 0 {
-			maxTime = nil
+		prevCursor = api.cursor
+		api.SetCursor(next)
+	}
+
+	// 时间线可能包含置顶/重复推文，统一按时间倒序并去重
+	sort.SliceStable(results, func(i, j int) bool {
+		return results[i].CreatedAt.After(results[j].CreatedAt)
+	})
+	if len(results) > 1 {
+		seen := make(map[uint64]struct{}, len(results))
+		deduped := make([]*Tweet, 0, len(results))
+		for _, tw := range results {
+			if _, ok := seen[tw.Id]; ok {
+				continue
+			}
+			seen[tw.Id] = struct{}{}
+			deduped = append(deduped, tw)
 		}
+		results = deduped
 	}
 	return results, nil
 }

@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -41,9 +42,11 @@ func (err *HttpStatusError) Error() string {
 }
 
 func IsStatusCode(err error, code int) bool {
-	e, ok := err.(*HttpStatusError)
-	if !ok {
-		return false
+	// resty 可能把钩子返回的错误包装成 *resty.ResponseError，
+	// 因此不能只用类型断言，否则 403/404 会被当成可重试错误。
+	var e *HttpStatusError
+	if errors.As(err, &e) {
+		return e.Code == code
 	}
-	return e.Code == code
+	return false
 }

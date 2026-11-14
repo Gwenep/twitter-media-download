@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 var db *sqlx.DB
@@ -23,7 +23,7 @@ func opentmpdb() *sqlx.DB {
 	}
 	path := tmpFile.Name()
 
-	db, err = sqlx.Connect("sqlite3", fmt.Sprintf("file:%s?_journal_mode=WAL&cache=shared", path))
+	db, err = sqlx.Connect("sqlite", fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)", path))
 
 	if err != nil {
 		panic(err)

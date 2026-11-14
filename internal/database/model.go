@@ -32,6 +32,18 @@ type UserLink struct {
 	ParentLstEntityId int32         `db:"parent_lst_entity_id"`
 }
 
+// MediaFile 记录 “推文 + 媒体地址 -> 本地文件名” 的对应关系。
+// 文件名相对于用户文件夹，因此整个存储目录迁移后依然有效。
+// 有了它，重试下载时可以跳过已经完成的媒体，不会产生重复文件，
+// 也不会因为文件名相同而误判为已下载。
+type MediaFile struct {
+	Id           sql.NullInt32 `db:"id"`
+	TweetId      uint64        `db:"tweet_id"`
+	Url          string        `db:"url"`
+	FileName     string        `db:"file_name"`
+	UserEntityId int32         `db:"user_entity_id"`
+}
+
 type Lst struct {
 	Id      uint64 `db:"id"`
 	Name    string `db:"name"`

@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/Gwenep/twitter-media-download/internal/database"
+	"github.com/Gwenep/twitter-media-download/internal/utils"
 )
 
 // 路径Plus
@@ -36,6 +38,15 @@ func syncPath(path SmartPath, expectedName string) error {
 	}
 
 	return os.MkdirAll(p, 0755)
+}
+
+// dirIsEmpty 判断目录是否为空，用于安全地复用/删除空目录
+func dirIsEmpty(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false, err
+	}
+	return len(entries) == 0, nil
 }
 
 type UserEntity struct {
@@ -97,15 +108,56 @@ func (ue *UserEntity) Rename(title string) error {
 
 	old, _ := ue.Path()
 	newPath := filepath.Join(filepath.Dir(old), title)
+	if filepath.Clean(old) == filepath.Clean(newPath) {
+		return nil
+	}
+
+	// 目标目录已存在时不要继续：否则数据库会指向新目录，而旧目录里的文件
+	// 会被遗留成“孤儿”，看起来就像内容丢失了。
+	// 空目录可以直接删除后复用，避免用户手动留下的空文件夹阻塞同步。
+	if exist, err := utils.PathExists(newPath); err != nil {
+		return err
+	} else if exist {
+		empty, err := dirIsEmpty(newPath)
+		if err != nil {
+			return err
+		}
+		if !empty {
+			return fmt.Errorf("target dir already exists: %s", newPath)
+		}
+		if err := os.Remove(newPath); err != nil {
+			return err
+		}
+	}
 
 	err := os.Rename(old, newPath)
 	if os.IsNotExist(err) {
-		err = os.Mkdir(newPath, 0755)
+		err = os.MkdirAll(newPath, 0755)
 	}
-	if err != nil && !os.IsExist(err) {
+	if err != nil {
 		return err
 	}
 
+	ue.record.Name = title
+	if err := database.UpdateUserEntity(ue.db, ue.record); err != nil {
+		return err
+	}
+	database.RegisterUserDir(filepath.Dir(newPath), ue.record.Uid, title)
+	return nil
+}
+
+// RepairName 只修改数据库记录中的文件夹名，不移动磁盘目录。
+//
+// 旧版本可能把某个用户的记录错误地关联到别人的文件夹（同名匹配未校验 user_id）。
+// 这种情况下绝不能调用 Rename 移动别人的文件夹，只需要让当前记录重新指向
+// 属于自己的文件夹名，后续 syncPath 会创建/复用自己的目录。
+func (ue *UserEntity) RepairName(title string) error {
+	if !ue.created {
+		return fmt.Errorf("user entity [%s:%d] was not created", ue.record.ParentDir, ue.record.Uid)
+	}
+	if ue.record.Name == title {
+		return nil
+	}
 	ue.record.Name = title
 	return database.UpdateUserEntity(ue.db, ue.record)
 }
@@ -216,14 +268,48 @@ func (le *ListEntity) Rename(title string) error {
 
 	path, _ := le.Path()
 	newPath := filepath.Join(filepath.Dir(path), title)
+	if filepath.Clean(path) == filepath.Clean(newPath) {
+		return nil
+	}
+	if exist, err := utils.PathExists(newPath); err != nil {
+		return err
+	} else if exist {
+		empty, err := dirIsEmpty(newPath)
+		if err != nil {
+			return err
+		}
+		if !empty {
+			return fmt.Errorf("target dir already exists: %s", newPath)
+		}
+		if err := os.Remove(newPath); err != nil {
+			return err
+		}
+	}
 	err := os.Rename(path, newPath)
 	if os.IsNotExist(err) {
 		err = os.Mkdir(newPath, 0755)
 	}
-	if err != nil && !os.IsExist(err) {
+	if err != nil {
 		return err
 	}
 
+	le.record.Name = title
+	if err := database.UpdateLstEntity(le.db, le.record); err != nil {
+		return err
+	}
+	database.RegisterListDir(filepath.Dir(newPath), le.record.LstId, title)
+	return nil
+}
+
+// RepairName 只修改数据库记录中的文件夹名，不移动磁盘目录。
+// 用于旧版本错误关联到其他列表文件夹的情况。
+func (le *ListEntity) RepairName(title string) error {
+	if !le.created {
+		return fmt.Errorf("list entity [%s:%d] was not created", le.record.ParentDir, le.record.LstId)
+	}
+	if le.record.Name == title {
+		return nil
+	}
 	le.record.Name = title
 	return database.UpdateLstEntity(le.db, le.record)
 }
@@ -265,7 +351,16 @@ func updateUserLink(lnk *database.UserLink, db *sqlx.DB, path string) error {
 	}
 
 	if lnk.Name == name {
-		// 用户未改名，但仍应确保链接存在
+		// 用户未改名，但仍应确保链接存在且指向正确位置。
+		// 存储目录迁移后，旧链接仍指向旧根目录，需要重建。
+		if target, err := os.Readlink(linkpath); err == nil {
+			if strings.EqualFold(filepath.Clean(target), filepath.Clean(path)) {
+				return nil
+			}
+			if err := os.Remove(linkpath); err != nil {
+				return err
+			}
+		}
 		err = os.Symlink(path, linkpath)
 		if os.IsExist(err) {
 			err = nil

@@ -27,8 +27,8 @@ func init() {
 		panic(err)
 	}
 
-	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&cache=shared", path)
-	db, err = sqlx.Connect("sqlite3", dsn)
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)", path)
+	db, err = sqlx.Connect("sqlite", dsn)
 	if err != nil {
 		panic(err)
 	}
