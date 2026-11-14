@@ -701,6 +701,14 @@ func BatchUserDownload(ctx context.Context, client *resty.Client, db *sqlx.DB, u
 
 	missingTweets := 0
 	depthByEntity := make(map[*UserEntity]int)
+	// 被限流的用户重试次数；限流是临时的，不能像普通错误那样直接放弃
+	rateLimitRetries := make(map[*UserEntity]int)
+	var rateLimitMtx sync.Mutex
+	rateLimitedUsers := make(map[string]struct{})
+	// 限流最多重试几次、每次至少等多久（服务端没给 Retry-After 时使用）
+	const maxRateLimitRetry = 5
+	const defaultRateLimitWait = 60 * time.Second
+	const maxRateLimitWait = 15 * time.Minute
 	// 大顶堆，以用户深度
 	userEntityHeap := utils.NewHeap(func(lhs, rhs *UserEntity) bool {
 		luser, ruser := uidToUser[lhs.Uid()], uidToUser[rhs.Uid()]
@@ -862,16 +870,69 @@ func BatchUserDownload(ctx context.Context, client *resty.Client, db *sqlx.DB, u
 			return
 		}
 		if err != nil {
+			// 限流（429 / error code 1015）是临时状态：等待一段时间后重试，
+			// 而不是像普通错误那样直接放弃该用户，否则这次运行等于什么都没做。
+			if delay, limited := twitter.RateLimitDelay(err); limited {
+				rateLimitMtx.Lock()
+				retries := rateLimitRetries[entity]
+				rateLimitRetries[entity] = retries + 1
+				rateLimitMtx.Unlock()
+
+				if retries >= maxRateLimitRetry {
+					getterLogger.WithFields(log.Fields{
+						"user":    entity.Name(),
+						"retries": retries,
+					}).Warnln("still rate limited, giving up this run:", err)
+					return
+				}
+
+				wait := delay
+				if wait <= 0 {
+					// 没有任何速率头时退避等待，逐步加长
+					wait = defaultRateLimitWait * time.Duration(retries+1)
+				}
+				if wait > maxRateLimitWait {
+					wait = maxRateLimitWait
+				}
+
+				rateLimitMtx.Lock()
+				rateLimitedUsers[entity.Name()] = struct{}{}
+				rateLimitMtx.Unlock()
+
+				getterLogger.WithFields(log.Fields{
+					"user":    entity.Name(),
+					"wait":    wait,
+					"attempt": retries + 1,
+				}).Warnln("rate limited by x.com, will retry later:", err)
+
+				// 先等待再放回堆：如果立刻放回，调度器会在同一批里再次选中它，
+				// 变成并发重复请求，反而加重限流。
+				select {
+				case <-time.After(wait):
+					userEntityHeap.Push(entity)
+				case <-ctx.Done():
+				}
+				return
+			}
+
 			getterLogger.WithField("user", entity.Name()).Warnln("failed to get user medias:", err)
 			return
 		}
 
 		if len(tweets) == 0 {
+			rateLimitMtx.Lock()
+			delete(rateLimitedUsers, entity.Name())
+			rateLimitMtx.Unlock()
 			if err := database.UpdateUserEntityMediCount(db, entity.Id(), user.MediaCount); err != nil {
 				getterLogger.WithField("user", entity.Name()).Panicln("failed to update user medias count:", err)
 			}
 			return
 		}
+
+		// 成功取到时间线，清掉限流标记
+		rateLimitMtx.Lock()
+		delete(rateLimitedUsers, entity.Name())
+		rateLimitMtx.Unlock()
 
 		// 确保该用户所有推文已推送。注意：这里不再立即推进“最后下载时间”，
 		// 而是等所有下载结束后，根据实际成功/失败情况更新（见 finalizeUserFetchStats）。
@@ -968,6 +1029,13 @@ func BatchUserDownload(ctx context.Context, client *resty.Client, db *sqlx.DB, u
 		fails = append(fails, pt.(*TweetInEntity))
 	}
 	log.Debugf("%d users unable to start", userEntityHeap.Size())
+
+	rateLimitMtx.Lock()
+	limited := len(rateLimitedUsers)
+	rateLimitMtx.Unlock()
+	if limited > 0 {
+		log.WithField("users", limited).Warnln("some users were rate limited by x.com this run; their tweets were not fetched")
+	}
 
 	// 下载全部结束后再推进进度：只有成功（或永久跳过）的推文才会被算入，
 	// 失败推文下一次仍会落在时间线拉取范围内。
