@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/jmoiron/sqlx"
+	log "github.com/sirupsen/logrus"
 	"github.com/Gwenep/twitter-media-download/internal/database"
 	"github.com/Gwenep/twitter-media-download/internal/twitter"
 )
@@ -96,10 +97,33 @@ func (td *TweetDumper) GetTotal(db *sqlx.DB) ([]*TweetInEntity, error) {
 		if e == nil {
 			return nil, fmt.Errorf("entity %d is not exists", k)
 		}
-		ue := UserEntity{db: db, record: e, created: true}
 
 		for _, tw := range v {
-			results = append(results, &TweetInEntity{Tweet: tw, Entity: &ue})
+			target := e
+
+			// 旧版本曾把所有用户的失败推文都记在同一个实体（通常是第一个用户）下。
+			// 直接按记录里的实体重试，会把媒体写进别人的文件夹。
+			// 这里以推文作者为准：能找到作者的实体就改投，找不到就跳过，
+			// 等下次正常拉取该用户时间线时再下载。
+			if tw.Creator != nil && tw.Creator.Id != e.Uid {
+				right, err := database.LocateUserEntity(db, tw.Creator.Id, e.ParentDir)
+				if err != nil {
+					return nil, err
+				}
+				if right == nil {
+					log.WithFields(log.Fields{
+						"tweet":   tw.Id,
+						"author":  tw.Creator.Id,
+						"entity":  e.Uid,
+						"creator": tw.Creator.Title(),
+					}).Warnln("failed tweet belongs to another user, skipped and will be fetched again")
+					continue
+				}
+				target = right
+			}
+
+			ue := &UserEntity{db: db, record: target, created: true}
+			results = append(results, &TweetInEntity{Tweet: tw, Entity: ue})
 		}
 	}
 	return results, nil
