@@ -71,11 +71,8 @@ func Login(ctx context.Context, authToken string, ct0 string) (*resty.Client, st
 		v, ok := err.(*TwitterApiError)
 		return ok && r.Request.RawRequest.Host == "x.com" && (v.Code == ErrTimeout || v.Code == ErrOverCapacity || v.Code == ErrDependency)
 	})
-	client.AddRetryCondition(func(r *resty.Response, err error) bool {
-		// For Http 429
-		v, ok := err.(*utils.HttpStatusError)
-		return ok && r.Request.RawRequest.Host == "x.com" && v.Code == 429
-	})
+	// 429 不在这里重试：几秒内连续重试只会延长封禁，
+	// 交给下载层按 Retry-After 做分钟级退避（见 downloading.producer）。
 
 	client.SetTransport(&http.Transport{
 		MaxIdleConns:          0,

@@ -176,6 +176,7 @@ func (u *User) GetMeidas(ctx context.Context, client *resty.Client, timeRange *u
 	}
 
 	prevCursor := ""
+	emptyPages := 0
 	for {
 		currentTweets, next, err := u.getMediasOnePage(ctx, &api, client)
 		if err != nil {
@@ -184,14 +185,17 @@ func (u *User) GetMeidas(ctx context.Context, client *resty.Client, timeRange *u
 
 		if len(currentTweets) == 0 {
 			// 空页但仍有新 cursor 时不能直接结束：时间线中可能混有非推文模块，
-			// 直接退出会漏掉后面的内容。cursor 没有前进时才认为真正到末尾。
-			if next == "" || next == prevCursor || next == api.cursor {
+			// 直接退出会漏掉后面的内容。但连续多页为空时没必要继续翻，
+			// 否则会白白消耗请求次数，容易触发限流。
+			if next == "" || next == prevCursor || next == api.cursor || emptyPages >= 3 {
 				break
 			}
+			emptyPages++
 			prevCursor = api.cursor
 			api.SetCursor(next)
 			continue
 		}
+		emptyPages = 0
 
 		if timeRange == nil {
 			results = append(results, currentTweets...)
