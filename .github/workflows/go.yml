@@ -22,6 +22,7 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     
@@ -33,7 +34,9 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          # go.mod 里的 1.22.3 在 macOS 15 runner 上会生成 dyld 报错
+          # (missing LC_UUID load command) 的测试二进制，这里改用最新稳定版。
+          go-version: 'stable'
 
       
       - name: Build for Win
