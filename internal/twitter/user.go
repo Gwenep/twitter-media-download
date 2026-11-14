@@ -13,6 +13,11 @@ import (
 
 type FollowState int
 
+// timelinePageInterval 相邻两次时间线请求之间的最小间隔。
+// x.com 对 UserMedia 这类 GraphQL 接口有边缘限流（429 / error code 1015），
+// 短时间内连续翻页很容易触发，这里做一点节流。
+var timelinePageInterval = 1500 * time.Millisecond
+
 const (
 	FS_UNFOLLOW FollowState = iota
 	FS_FOLLOWING
@@ -177,7 +182,20 @@ func (u *User) GetMeidas(ctx context.Context, client *resty.Client, timeRange *u
 
 	prevCursor := ""
 	emptyPages := 0
+	firstPage := true
 	for {
+		// 页与页之间稍作停顿。旧版本通常只请求 1 页就停止，新版为了兼容
+		// 置顶/乱序推文会多翻一页，连续请求太密容易触发 x.com 的边缘限流
+		// （HTTP 429 + error code: 1015）。
+		if !firstPage {
+			select {
+			case <-time.After(timelinePageInterval):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		firstPage = false
+
 		currentTweets, next, err := u.getMediasOnePage(ctx, &api, client)
 		if err != nil {
 			return nil, err
@@ -185,9 +203,9 @@ func (u *User) GetMeidas(ctx context.Context, client *resty.Client, timeRange *u
 
 		if len(currentTweets) == 0 {
 			// 空页但仍有新 cursor 时不能直接结束：时间线中可能混有非推文模块，
-			// 直接退出会漏掉后面的内容。但连续多页为空时没必要继续翻，
-			// 否则会白白消耗请求次数，容易触发限流。
-			if next == "" || next == prevCursor || next == api.cursor || emptyPages >= 3 {
+			// 直接退出会漏掉后面的内容。但只多探一页，连续空页就没必要继续翻，
+			// 否则白白消耗请求次数，容易触发限流。
+			if next == "" || next == prevCursor || next == api.cursor || emptyPages >= 1 {
 				break
 			}
 			emptyPages++
