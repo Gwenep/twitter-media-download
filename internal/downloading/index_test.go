@@ -113,6 +113,39 @@ func TestIndexUserFolderReportsMissingFiles(t *testing.T) {
 	}
 }
 
+// 下载结束后应自动刷新本次运行涉及的用户清单。
+func TestRefreshSyncedManifests(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "tester(9005)")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	record := &database.UserEntity{Uid: 9005, ParentDir: base, Name: "tester(9005)"}
+	if err := database.CreateUserEntity(db, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.WriteUserMarker(dir, 9005, "tester", "tester"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "fresh.jpg"), []byte("abc"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	syncedUsers.Store(uint64(9005), &UserEntity{record: record, db: db})
+	defer syncedUsers.Delete(uint64(9005))
+
+	RefreshSyncedManifests()
+
+	manifest, err := database.ReadMediaManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest == nil || len(manifest.Files) != 1 || manifest.Files[0].FileName != "fresh.jpg" {
+		t.Fatalf("unexpected manifest: %+v", manifest)
+	}
+}
+
 // mtime 被改动过的旧文件，只要目录清单里的大小一致，也应该被认领而不重新下载。
 func TestPrepareMediaFileAdoptsIndexedFile(t *testing.T) {
 	dir := t.TempDir()
