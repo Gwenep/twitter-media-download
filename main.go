@@ -16,15 +16,15 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/Gwenep/twitter-media-download/internal/database"
+	"github.com/Gwenep/twitter-media-download/internal/downloading"
+	"github.com/Gwenep/twitter-media-download/internal/twitter"
+	"github.com/Gwenep/twitter-media-download/internal/utils"
 	"github.com/go-resty/resty/v2"
 	"github.com/gookit/color"
 	"github.com/jmoiron/sqlx"
 	"github.com/rifflock/lfshook"
 	log "github.com/sirupsen/logrus"
-	"github.com/Gwenep/twitter-media-download/internal/database"
-	"github.com/Gwenep/twitter-media-download/internal/downloading"
-	"github.com/Gwenep/twitter-media-download/internal/twitter"
-	"github.com/Gwenep/twitter-media-download/internal/utils"
 	"gopkg.in/yaml.v3"
 )
 
@@ -378,6 +378,8 @@ func main() {
 	var noRetry bool
 	var indexOnly bool
 	var audit bool
+	var deleteUser string
+	var deleteYes bool
 
 	flag.BoolVar(&confArg, "conf", false, "reconfigure")
 	flag.Var(&usrArgs, "user", "download tweets from the user specified by user_id/screen_name since the last download")
@@ -388,7 +390,15 @@ func main() {
 	flag.BoolVar(&noRetry, "no-retry", false, "quickly exit without retrying failed tweets")
 	flag.BoolVar(&indexOnly, "index-only", false, "build folder index (.tmd_media.json) without network access")
 	flag.BoolVar(&audit, "audit", false, "read-only check which media on the remote timeline are missing locally")
+	flag.StringVar(&deleteUser, "delete-user", "", "preview deleting one local user by screen_name/user_id; add --yes to execute")
+	flag.BoolVar(&deleteYes, "yes", false, "execute the deletion previewed by --delete-user")
 	flag.Parse()
+	if deleteUser != "" && (confArg || indexOnly || audit || len(usrArgs.id)+len(usrArgs.screenName)+len(listArgs.id)+len(follArgs.id)+len(follArgs.screenName) > 0) {
+		log.Fatal("--delete-user 不能与下载、索引、核对或配置参数同时使用")
+	}
+	if deleteYes && deleteUser == "" {
+		log.Fatal("--yes 只能与 --delete-user 一起使用")
+	}
 
 	var err error
 
@@ -469,6 +479,12 @@ func main() {
 
 	// 离线索引：只扫描已下载的目录，生成 .tmd_media.json。
 	// 不登录、不联网、不下载，也不会修改已有的媒体记录。
+	if deleteUser != "" {
+		if err := runDeleteUser(pathHelper, deleteUser, deleteYes); err != nil {
+			log.Fatalln("删除失败:", err)
+		}
+		return
+	}
 	if indexOnly {
 		if err := runIndexOnly(pathHelper, usrArgs); err != nil {
 			log.Fatalln("failed to build index:", err)
