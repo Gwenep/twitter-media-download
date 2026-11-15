@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -16,6 +17,33 @@ import (
 )
 
 var errMediaIdle = errors.New("媒体下载连续无数据")
+
+// 进度日志只保留简短文件名，完整名称仍用于实际保存。
+func transferDisplayName(path string) string {
+	name := []rune(filepath.Base(path))
+	if len(name) > 24 {
+		return string(name[:24]) + "……"
+	}
+	return string(name)
+}
+
+func transferProgress(received, total int64, speed float64) string {
+	rate := fmt.Sprintf("%.0f KB/s", speed/1024)
+	if speed >= 1048576 {
+		rate = fmt.Sprintf("%.1f MB/s", speed/1048576)
+	}
+	if total <= 0 {
+		return fmt.Sprintf("已下载 %.1f MB · %s", float64(received)/1048576, rate)
+	}
+	percent := float64(received) / float64(total) * 100
+	if percent > 100 {
+		percent = 100
+	}
+	filled := int(percent / 5)
+	return fmt.Sprintf("%3.0f%% [%s%s] %.1f/%.1f MB · %s", percent,
+		strings.Repeat("=", filled), strings.Repeat("-", 20-filled),
+		float64(received)/1048576, float64(total)/1048576, rate)
+}
 
 // 超时按连续无数据计算，慢速但持续传输的大文件不会因总用时过长被取消。
 func transferMedia(ctx context.Context, client *resty.Client, url, path string) error {
@@ -31,7 +59,7 @@ func transferMediaWithIdle(ctx context.Context, client *resty.Client, url, path 
 		if !errors.Is(err, errMediaIdle) || attempt >= 3 {
 			return err
 		}
-		log.WithFields(log.Fields{"file": filepath.Base(path), "attempt": attempt + 1}).Warn("下载停滞，重新连接重试（最多 3 次）")
+		log.Warnf("下载停滞，重新连接重试（%d/3） %s", attempt+1, transferDisplayName(path))
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -78,18 +106,13 @@ func transferMediaOnce(ctx context.Context, client *resty.Client, url, path stri
 				return
 			case now := <-ticker.C:
 				if now.Sub(time.Unix(0, last.Load())) >= idle {
-					log.WithFields(log.Fields{"file": filepath.Base(path), "idle": idle}).Warn("连续无数据，取消本次下载")
+					log.Warnf("连续 %s 无数据，取消本次下载 %s", idle, transferDisplayName(path))
 					cancel(errMediaIdle)
 					return
 				}
 				if elapsed := now.Sub(previousTime); elapsed >= 30*time.Second {
 					n := received.Load()
-					log.WithFields(log.Fields{
-						"file":        filepath.Base(path),
-						"received_MB": fmt.Sprintf("%.1f", float64(n)/1048576),
-						"total_MB":    fmt.Sprintf("%.1f", float64(total.Load())/1048576),
-						"speed_KB_s":  fmt.Sprintf("%.1f", float64(n-previousBytes)/1024/elapsed.Seconds()),
-					}).Info("下载进度（总大小 0 表示未知）")
+					log.Infof("下载 %s  %s", transferProgress(n, total.Load(), float64(n-previousBytes)/elapsed.Seconds()), transferDisplayName(path))
 					previousTime, previousBytes = now, n
 				}
 			}
