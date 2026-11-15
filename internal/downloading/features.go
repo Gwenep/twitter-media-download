@@ -126,7 +126,20 @@ func prepareMediaFile(db *sqlx.DB, entity *UserEntity, dir string, tweet *twitte
 			}
 		}
 		if !claimed {
-			if info, err := os.Stat(legacyPath); err == nil && sameTweetTime(info.ModTime(), tweet.CreatedAt) {
+			matched := false
+			if info, err := os.Stat(legacyPath); err == nil {
+				// 旧版本下载的文件会把 mtime 写成推文发布时间
+				matched = sameTweetTime(info.ModTime(), tweet.CreatedAt)
+				if !matched {
+					// mtime 被系统工具/同步软件改过时，用目录索引（.tmd_media.json）
+					// 里的文件名 + 大小认领：大小完全一致才认为是当初下载的那个文件
+					if entry, ok := database.LookupManifestFile(dir, preferred); ok &&
+						entry.Size == info.Size() && info.Size() > 0 {
+						matched = true
+					}
+				}
+			}
+			if matched {
 				if db != nil && entity != nil {
 					if err := database.CreateMediaFile(db, &database.MediaFile{
 						TweetId:      tweet.Id,

@@ -155,10 +155,33 @@ func GetUserById(db *sqlx.DB, uid uint64) (*User, error) {
 	return result, nil
 }
 
+// GetUserByScreenName 按用户名查询用户，不存在时返回 nil, nil
+func GetUserByScreenName(db *sqlx.DB, screenName string) (*User, error) {
+	stmt := `SELECT * FROM users WHERE screen_name=? COLLATE NOCASE`
+	result := &User{}
+	err := db.Get(result, stmt, screenName)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 func UpdateUser(db *sqlx.DB, usr *User) error {
 	stmt := `UPDATE users SET screen_name=:screen_name, name=:name, protected=:protected, friends_count=:friends_count WHERE id=:id`
 	_, err := db.NamedExec(stmt, usr)
 	return err
+}
+
+// GetUserEntities 返回某个用户在数据库中的全部实体记录（只读，不做任何修正）
+func GetUserEntities(db *sqlx.DB, uid uint64) ([]*UserEntity, error) {
+	entities := make([]*UserEntity, 0)
+	if err := db.Select(&entities, `SELECT * FROM user_entities WHERE user_id=?`, uid); err != nil {
+		return nil, err
+	}
+	return entities, nil
 }
 
 func CreateUserEntity(db *sqlx.DB, entity *UserEntity) error {
@@ -568,6 +591,15 @@ func GetMediaFileByName(db *sqlx.DB, entityId int32, fileName string) (*MediaFil
 		return nil, err
 	}
 	return result, nil
+}
+
+// ListMediaFiles 返回某个用户实体下已记录的全部媒体文件
+func ListMediaFiles(db *sqlx.DB, entityId int) ([]MediaFile, error) {
+	files := make([]MediaFile, 0)
+	if err := db.Select(&files, `SELECT * FROM media_files WHERE user_entity_id=?`, entityId); err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
 // CreateMediaFile 记录（或更新）媒体文件映射。

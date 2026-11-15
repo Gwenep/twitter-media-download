@@ -206,6 +206,69 @@ func newStorePath(root string) (*storePath, error) {
 	return &ph, nil
 }
 
+// runIndexOnly 离线扫描用户文件夹并生成 .tmd_media.json。
+// 不登录、不联网、不下载；数据库不存在时会自动建一个空库再读。
+func runIndexOnly(pathHelper *storePath, usrArgs userArgs) error {
+	db, err := connectDatabase(pathHelper.db)
+	if err != nil {
+		return fmt.Errorf("连接数据库失败: %w", err)
+	}
+	defer db.Close()
+
+	var targets []downloading.IndexTarget
+	if len(usrArgs.id) == 0 && len(usrArgs.screenName) == 0 {
+		targets, err = downloading.CollectIndexTargets(pathHelper.users)
+	} else {
+		targets, err = downloading.ResolveIndexTargets(db, pathHelper.users, usrArgs.id, usrArgs.screenName)
+	}
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		fmt.Println("没有找到带 .tmd_user.json 标记的用户文件夹。先正常下载一次，再运行索引。")
+		return nil
+	}
+
+	results := make([]*downloading.IndexResult, 0, len(targets))
+	for _, target := range targets {
+		result, err := downloading.IndexUserFolder(db, target)
+		if err != nil {
+			return fmt.Errorf("索引 %s 失败: %w", target.Dir, err)
+		}
+		results = append(results, result)
+	}
+	printIndexResults(results)
+	return nil
+}
+
+func printIndexResults(results []*downloading.IndexResult) {
+	fmt.Println(strings.Repeat("=", 70))
+	for _, r := range results {
+		fmt.Printf("用户：%s\n", r.Title())
+		fmt.Printf("  目录：%s\n", r.Dir)
+		if r.EntityId > 0 {
+			fmt.Printf("  数据库实体：id=%d\n", r.EntityId)
+		} else {
+			fmt.Printf("  数据库实体：无（数据库里没有这个用户，索引仍然可用）\n")
+		}
+		fmt.Printf("  磁盘文件：%d    已有记录：%d    无记录：%d\n", r.Total, r.Recorded, r.Unrecorded)
+		fmt.Printf("  索引清单：%d 条（新增 %d 条）\n", r.Manifested, r.Added)
+		if len(r.MissingFiles) > 0 {
+			fmt.Printf("  记录存在但磁盘缺失：%d 个（只报告，不删除记录）\n", len(r.MissingFiles))
+			for i, name := range r.MissingFiles {
+				if i >= 5 {
+					fmt.Printf("    ...（其余 %d 个略）\n", len(r.MissingFiles)-5)
+					break
+				}
+				fmt.Printf("    - %s\n", name)
+			}
+		}
+	}
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Println("索引已写入各用户文件夹的 .tmd_media.json。")
+	fmt.Println("即使数据库丢失或换机器，只要文件夹还在，这些文件就会被识别为已下载，不会重复下载。")
+}
+
 func initLogger(dbg bool, logFile io.Writer) {
 	log.SetFormatter(&log.TextFormatter{
 		ForceColors:   true,
@@ -230,6 +293,7 @@ func main() {
 	var dbg bool
 	var autoFollow bool
 	var noRetry bool
+	var indexOnly bool
 
 	flag.BoolVar(&confArg, "conf", false, "reconfigure")
 	flag.Var(&usrArgs, "user", "download tweets from the user specified by user_id/screen_name since the last download")
@@ -238,6 +302,7 @@ func main() {
 	flag.BoolVar(&dbg, "dbg", false, "display debug message")
 	flag.BoolVar(&autoFollow, "auto-follow", false, "send follow request automatically to protected users")
 	flag.BoolVar(&noRetry, "no-retry", false, "quickly exit without retrying failed tweets")
+	flag.BoolVar(&indexOnly, "index-only", false, "build folder index (.tmd_media.json) without network access")
 	flag.Parse()
 
 	var err error
@@ -303,6 +368,15 @@ func main() {
 	pathHelper, err := newStorePath(conf.RootPath)
 	if err != nil {
 		log.Fatalln("failed to make store dir:", err)
+	}
+
+	// 离线索引：只扫描已下载的目录，生成 .tmd_media.json。
+	// 不登录、不联网、不下载，也不会修改已有的媒体记录。
+	if indexOnly {
+		if err := runIndexOnly(pathHelper, usrArgs); err != nil {
+			log.Fatalln("failed to build index:", err)
+		}
+		return
 	}
 
 	// sign in
@@ -399,6 +473,10 @@ func main() {
 	if err != nil {
 		log.Errorln("failed to download:", err)
 	}
+
+	// 刷新目录索引，让「这些文件已下载」这一事实跟着文件夹走，
+	// 而不是只存在数据库里（数据库丢失/换机器后依然能识别旧文件）
+	downloading.RefreshSyncedManifests()
 }
 
 func setClientLogger(client *resty.Client, out io.Writer) {
