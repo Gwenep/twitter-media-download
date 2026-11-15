@@ -2,6 +2,7 @@ package downloading
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,27 @@ import (
 )
 
 var errMediaIdle = errors.New("媒体下载连续无数据")
+
+var transferSequence atomic.Int64
+
+// 通过独立的结构化行向启动脚本发送实时状态，脚本原地刷新而不写入日志。
+func emitTransferProgress(id int64, path string, received, total int64, speed float64, done bool) {
+	if os.Getenv("TMD_LIVE_PROGRESS") != "1" {
+		return
+	}
+	percent := -1
+	if total > 0 {
+		percent = min(100, int(float64(received)/float64(total)*100))
+	}
+	data, _ := json.Marshal(struct {
+		ID      int64  `json:"id"`
+		Name    string `json:"name"`
+		Status  string `json:"status"`
+		Percent int    `json:"percent"`
+		Done    bool   `json:"done"`
+	}{id, transferDisplayName(path), transferProgress(received, total, speed), percent, done})
+	fmt.Printf("TMD_PROGRESS:%s\n", data)
+}
 
 // 进度日志只保留简短文件名，完整名称仍用于实际保存。
 func transferDisplayName(path string) string {
@@ -87,6 +109,9 @@ func transferMediaOnce(ctx context.Context, client *resty.Client, url, path stri
 	reqCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	var last, received, total atomic.Int64
+	id := transferSequence.Add(1)
+	emitTransferProgress(id, path, 0, 0, 0, false)
+	defer func() { emitTransferProgress(id, path, received.Load(), total.Load(), 0, true) }()
 	last.Store(time.Now().UnixNano())
 	interval := idle / 4
 	if interval > time.Second {
@@ -99,6 +124,7 @@ func transferMediaOnce(ctx context.Context, client *resty.Client, url, path stri
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		previousTime := time.Now()
+		previousLog := previousTime
 		var previousBytes int64
 		for {
 			select {
@@ -110,9 +136,14 @@ func transferMediaOnce(ctx context.Context, client *resty.Client, url, path stri
 					cancel(errMediaIdle)
 					return
 				}
-				if elapsed := now.Sub(previousTime); elapsed >= 30*time.Second {
+				if elapsed := now.Sub(previousTime); elapsed >= time.Second {
 					n := received.Load()
-					log.Infof("下载 %s  %s", transferProgress(n, total.Load(), float64(n-previousBytes)/elapsed.Seconds()), transferDisplayName(path))
+					speed := float64(n-previousBytes) / elapsed.Seconds()
+					emitTransferProgress(id, path, n, total.Load(), speed, false)
+					if now.Sub(previousLog) >= 30*time.Second {
+						log.Infof("下载 %s  %s", transferProgress(n, total.Load(), speed), transferDisplayName(path))
+						previousLog = now
+					}
 					previousTime, previousBytes = now, n
 				}
 			}
