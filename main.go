@@ -401,11 +401,19 @@ func main() {
 	} else {
 		homepath = os.Getenv("HOME")
 	}
-	if homepath == "" {
-		panic("failed to get home path from env")
+	executable, err := os.Executable()
+	if err != nil {
+		log.Fatalln("failed to locate executable:", err)
 	}
-
-	appRootPath := filepath.Join(homepath, ".tmd2")
+	exeDir := filepath.Dir(executable)
+	legacyDir := ""
+	if homepath != "" {
+		legacyDir = filepath.Join(homepath, ".tmd2")
+	}
+	appRootPath, err := prepareConfigDir(exeDir, legacyDir)
+	if err != nil {
+		log.Fatalln("failed to prepare portable config:", err)
+	}
 	confPath := filepath.Join(appRootPath, "conf.yaml")
 	cliLogPath := filepath.Join(appRootPath, "client.log")
 	logPath := filepath.Join(appRootPath, "tmd2.log")
@@ -444,7 +452,11 @@ func main() {
 		log.Println("config done")
 		return
 	}
-	log.Infoln("config is loaded")
+	log.WithField("path", confPath).Infoln("config is loaded")
+	// 相对下载路径以 exe 所在目录为基准，不受终端当前目录影响。
+	if !filepath.IsAbs(conf.RootPath) {
+		conf.RootPath = filepath.Join(exeDir, conf.RootPath)
+	}
 	if conf.MaxDownloadRoutine > 0 {
 		downloading.MaxDownloadRoutine = conf.MaxDownloadRoutine
 	}

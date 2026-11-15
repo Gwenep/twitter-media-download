@@ -76,7 +76,11 @@ go build .
 tmd --conf
 ```
 
-> **执行上述命令将导致引导配置程序重新运行，这将重新配置整个配置文件，而不是单独的配置项。单独修改配置项**请至 `%appdata%/.tmd2/conf.yaml` 或 `$HOME/.tmd2/conf.yaml`手动修改
+> **执行上述命令将导致引导配置程序重新运行，这将重新配置整个配置文件，而不是单独的配置项。单独修改配置项**请编辑 exe 同目录下的 `.tmd-config/conf.yaml`。
+
+配置、Cookie 和程序日志默认保存在可执行文件旁边的 `.tmd-config` 文件夹。首次使用会自动复制旧版 `%APPDATA%/.tmd2`（Linux/macOS 为 `$HOME/.tmd2`）中的配置和备用 Cookie，已有便携配置不会被覆盖，旧文件也不会被删除。配置准备完成后无需依赖旧目录。
+
+`root_path` 可使用相对路径，例如 `root_path: downloads`，以可执行文件所在目录为基准。一起备份/移动 exe、`.tmd-config` 和 `downloads` 即可；数据库和失败记录仍在下载目录的 `.data` 中。`.tmd-config` 含登录 Cookie，应随私人备份保存。
 
 ### 命令说明
 
@@ -144,7 +148,7 @@ $Env:HTTPS_PROXY="http://127.0.0.1:7890"
 
 程序动态从所有可用 cookie 中选择一个不会被速率限制的 cookie 请求用户推文，以避免因单一 cookie 的速率限制导致程序被阻塞。
 
-按如下格式创建 `$HOME/.tmd2/additional_cookies.yaml` 或 `%appdata%/.tmd2/additional_cookies.yaml`
+按如下格式创建 exe 同目录下的 `.tmd-config/additional_cookies.yaml`
 
 ```yaml
 - auth_token: xxxxxxxxx1
