@@ -269,6 +269,89 @@ func printIndexResults(results []*downloading.IndexResult) {
 	fmt.Println("即使数据库丢失或换机器，只要文件夹还在，这些文件就会被识别为已下载，不会重复下载。")
 }
 
+// runAudit 只读核对：拉取完整时间线，检查哪些远程媒体本地没有。
+// 必须用 --user 指定用户；不建议一次核对所有用户（会拉取每个用户的全部时间线）。
+func runAudit(ctx context.Context, client *resty.Client, pathHelper *storePath, usrArgs userArgs) error {
+	if len(usrArgs.id) == 0 && len(usrArgs.screenName) == 0 {
+		return fmt.Errorf("--audit 需要用 --user 指定要核对的用户")
+	}
+
+	db, err := connectDatabase(pathHelper.db)
+	if err != nil {
+		return fmt.Errorf("连接数据库失败: %w", err)
+	}
+	defer db.Close()
+
+	targets, err := downloading.ResolveIndexTargets(db, pathHelper.users, usrArgs.id, usrArgs.screenName)
+	if err != nil {
+		return err
+	}
+
+	results := make([]*downloading.AuditResult, 0, len(targets))
+	for _, target := range targets {
+		fmt.Printf("正在核对 %s 的完整时间线，请稍候……\n", target.Title())
+		result, err := downloading.AuditUserFolder(ctx, client, db, target)
+		if err != nil {
+			return fmt.Errorf("核对 %s 失败: %w", target.Title(), err)
+		}
+		results = append(results, result)
+	}
+
+	printAuditResults(results)
+	return nil
+}
+
+func printAuditResults(results []*downloading.AuditResult) {
+	fmt.Println(strings.Repeat("=", 70))
+	for _, r := range results {
+		fmt.Printf("用户：%s\n", r.Title())
+		fmt.Printf("  目录：%s\n", r.Dir)
+		if r.EntityId > 0 {
+			fmt.Printf("  数据库实体：id=%d\n", r.EntityId)
+		} else {
+			fmt.Printf("  数据库实体：无（只能按文件名 + 清单核对）\n")
+		}
+		fmt.Printf("  远程带媒体推文：%d    远程媒体：%d\n", r.Tweets, r.MediaTotal)
+		fmt.Printf("  本地已有：%d（记录核对 %d，按文件名/清单认领 %d）\n",
+			r.Recorded+r.Legacy, r.Recorded, r.Legacy)
+
+		if len(r.Missing) == 0 {
+			fmt.Printf("  缺失：0\n")
+		} else {
+			fmt.Printf("  缺失：%d\n", len(r.Missing))
+			for i, m := range r.Missing {
+				if i >= 50 {
+					fmt.Printf("    ...（其余 %d 个略，可用 --audit 输出重定向到文件查看全部）\n", len(r.Missing)-50)
+					break
+				}
+				reason := ""
+				if m.Recorded {
+					reason = "（有记录但文件丢失）"
+				}
+				fmt.Printf("    - %s  %s%s\n", m.CreatedAt.Format("2006-01-02 15:04"), m.FileName, reason)
+				fmt.Printf("      %s\n", m.Url)
+			}
+		}
+
+		if len(r.Extra) > 0 {
+			fmt.Printf("  本地多出：%d 个文件（远程时间线里没有对应，可能是重复文件或推文已删除）\n", len(r.Extra))
+			for i, name := range r.Extra {
+				if i >= 10 {
+					fmt.Printf("    ...（其余 %d 个略）\n", len(r.Extra)-10)
+					break
+				}
+				fmt.Printf("    - %s\n", name)
+			}
+		}
+		if r.NoExt > 0 {
+			fmt.Printf("  无法识别扩展名的媒体：%d（未参与核对）\n", r.NoExt)
+		}
+	}
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Println("核对是只读的：没有下载、没有写入文件、没有修改数据库，进度也没有变化。")
+	fmt.Println("缺失的媒体下次正常下载时会按最新发布时间重新拉取；如需立刻补齐，可直接正常运行一次该用户。")
+}
+
 func initLogger(dbg bool, logFile io.Writer) {
 	log.SetFormatter(&log.TextFormatter{
 		ForceColors:   true,
@@ -294,6 +377,7 @@ func main() {
 	var autoFollow bool
 	var noRetry bool
 	var indexOnly bool
+	var audit bool
 
 	flag.BoolVar(&confArg, "conf", false, "reconfigure")
 	flag.Var(&usrArgs, "user", "download tweets from the user specified by user_id/screen_name since the last download")
@@ -303,6 +387,7 @@ func main() {
 	flag.BoolVar(&autoFollow, "auto-follow", false, "send follow request automatically to protected users")
 	flag.BoolVar(&noRetry, "no-retry", false, "quickly exit without retrying failed tweets")
 	flag.BoolVar(&indexOnly, "index-only", false, "build folder index (.tmd_media.json) without network access")
+	flag.BoolVar(&audit, "audit", false, "read-only check which media on the remote timeline are missing locally")
 	flag.Parse()
 
 	var err error
@@ -407,6 +492,15 @@ func main() {
 	setClientLogger(client, cliLogFile)
 	for _, cli := range addtional {
 		setClientLogger(cli, cliLogFile)
+	}
+
+	// 只读核对：拉取完整时间线（忽略最新发布时间），逐个媒体检查本地是否已有。
+	// 不下载、不写文件、不修改数据库，也不会推进进度。
+	if audit {
+		if err := runAudit(ctx, client, pathHelper, usrArgs); err != nil {
+			log.Fatalln("failed to audit:", err)
+		}
+		return
 	}
 
 	// load previous tweets

@@ -213,31 +213,18 @@ func downloadTweetMedia(ctx context.Context, client *resty.Client, db *sqlx.DB, 
 	text := utils.WinFileName(tweet.Text)
 	downloaded := 0
 	var firstTransient error
-	extCount := make(map[string]int)
 
-	for _, u := range tweet.Urls {
-		if u == "" {
-			continue
-		}
+	candidates, skipped := mediaCandidates(tweet)
+	for _, u := range skipped {
+		log.WithFields(log.Fields{
+			"user": tweet.Creator.Title(),
+			"url":  u,
+		}).Warnln("failed to get file extension from url, skipped")
+	}
 
-		ext, err := utils.GetExtFromUrl(u)
-		if err != nil || ext == "" {
-			log.WithFields(log.Fields{
-				"user": tweet.Creator.Title(),
-				"url":  u,
-			}).Warnln("failed to get file extension from url, skipped")
-			continue
-		}
-		ext = strings.ToLower(ext)
-
-		index := extCount[ext]
-		extCount[ext] = index + 1
-		preferred := text + ext
-		if index > 0 {
-			preferred = fmt.Sprintf("%s(%d)%s", text, index, ext)
-		}
-
-		name, exist, reserved, err := prepareMediaFile(db, entity, dir, tweet, u, preferred)
+	for _, media := range candidates {
+		u := media.Url
+		name, exist, reserved, err := prepareMediaFile(db, entity, dir, tweet, u, media.Name)
 		if err != nil {
 			if firstTransient == nil {
 				firstTransient = err
