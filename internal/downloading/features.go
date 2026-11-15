@@ -237,7 +237,7 @@ func downloadTweetMedia(ctx context.Context, client *resty.Client, db *sqlx.DB, 
 		}
 
 		path := filepath.Join(dir, name)
-		resp, err := client.R().SetContext(ctx).SetQueryParam("name", "4096x4096").Get(u)
+		err = transferMedia(ctx, client, u, path)
 		if err != nil {
 			if reserved && db != nil {
 				_ = database.DeleteMediaFile(db, tweet.Id, u)
@@ -249,33 +249,7 @@ func downloadTweetMedia(ctx context.Context, client *resty.Client, db *sqlx.DB, 
 				}).Warnln("media is unavailable (403/404/410), skipped:", err)
 				continue
 			}
-			if firstTransient == nil {
-				firstTransient = err
-			}
-			continue
-		}
-
-		file, err := os.Create(path)
-		if err != nil {
-			if reserved && db != nil {
-				_ = database.DeleteMediaFile(db, tweet.Id, u)
-			}
-			if firstTransient == nil {
-				firstTransient = err
-			}
-			continue
-		}
-
-		_, err = file.Write(resp.Body())
-		closeErr := file.Close()
-		if err == nil {
-			err = closeErr
-		}
-		if err != nil {
-			if reserved && db != nil {
-				_ = database.DeleteMediaFile(db, tweet.Id, u)
-			}
-			_ = os.Remove(path)
+			log.WithFields(log.Fields{"file": name}).Warnln("媒体下载未完成，将交给失败重试流程:", err)
 			if firstTransient == nil {
 				firstTransient = err
 			}
